@@ -75,3 +75,12 @@ Key endpoints:
 | `POST` | `/testnet/block/create` | Create blocks (body: `{"num_blocks": N}`) |
 | `GET` | `/testnet/program/{id}` | Get a deployed program |
 | `GET` | `/testnet/program/{id}/mapping/{name}/{key}` | Get a mapping value |
+| `POST` | `/testnet/shutdown` | Gracefully shut down the node |
+
+### Shutdown
+
+To stop the node gracefully (draining any in-flight requests before exiting):
+
+```sh
+curl -X POST http://127.0.0.1:3030/testnet/shutdown
+```
