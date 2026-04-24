@@ -144,7 +144,7 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
     // Record the height before handing the ledger off, so we know how far to advance.
     let current_height = ledger.latest_height();
 
-    Rest::start(socket_addr, rps, ledger, manual_block_creation, private_key)
+    let rest = Rest::start(socket_addr, rps, ledger, manual_block_creation, private_key)
         .await
         .expect("Failed to start the REST API server");
     println!("Server running on http://{socket_addr}");
@@ -165,7 +165,8 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
         }
     }
 
-    std::future::pending::<()>().await;
+    // Wait until the server shuts down (via the /shutdown endpoint or a signal).
+    rest.wait_for_shutdown().await;
     Ok(())
 }
 

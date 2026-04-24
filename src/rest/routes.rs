@@ -569,6 +569,15 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Ok((StatusCode::OK, ErasedJson::new(tx_id)))
     }
 
+    /// POST /<network>/shutdown
+    pub(crate) async fn shutdown(State(rest): State<Self>) -> StatusCode {
+        tracing::info!("Shutdown requested via REST API");
+        if let Some(tx) = rest.shutdown_tx.lock().take() {
+            let _ = tx.send(());
+        }
+        StatusCode::OK
+    }
+
     /// POST /{network}/create_block
     pub(crate) async fn create_block(
         State(rest): State<Self>,

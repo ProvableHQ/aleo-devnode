@@ -42,7 +42,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, atomic::AtomicUsize},
 };
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 // use tower::util::ServiceExt;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::{
@@ -72,6 +72,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>> {
     manual_block_creation: bool,
     /// The Private Key used for block creation.
     private_key: PrivateKey<N>,
+    /// Sender half of the shutdown channel; consumed on first use.
+    shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
@@ -92,6 +94,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
             num_verifying_executions: Default::default(),
             manual_block_creation,
             private_key,
+            shutdown_tx: Default::default(),
         };
         // Spawn the server.
         server.spawn_server(rest_ip, rest_rps).await?;
@@ -173,7 +176,10 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             .route("/statePath/{commitment}", get(Self::get_state_path_for_commitment))
             .route("/statePaths", get(Self::get_state_paths_for_commitments))
             .route("/stateRoot/latest", get(Self::get_state_root_latest))
-            .route("/stateRoot/{height}", get(Self::get_state_root));
+            .route("/stateRoot/{height}", get(Self::get_state_root))
+
+            // POST ../shutdown
+            .route("/shutdown", post(Self::shutdown));
 
         routes
             // Pass in `Rest` to make things convenient.
@@ -187,6 +193,14 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             // Cap the request body size at 512KiB.
             .layer(DefaultBodyLimit::max(512 * 1024))
             .layer(governor_layer)
+    }
+
+    /// Waits until the server task exits (e.g. after a shutdown signal).
+    pub async fn wait_for_shutdown(self) {
+        let handles: Vec<_> = self.handles.lock().drain(..).collect();
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     async fn spawn_server(&mut self, rest_ip: SocketAddr, rest_rps: u32) -> Result<()> {
@@ -213,9 +227,13 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         let rest_listener =
             TcpListener::bind(rest_ip).await.with_context(|| "Failed to bind TCP port for REST endpoints")?;
 
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        *self.shutdown_tx.lock() = Some(shutdown_tx);
+
         let handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(rest_listener, router.into_make_service_with_connect_info::<SocketAddr>()).await
-            {
+            let serve = axum::serve(rest_listener, router.into_make_service_with_connect_info::<SocketAddr>())
+                .with_graceful_shutdown(async move { shutdown_rx.await.ok(); });
+            if let Err(e) = serve.await {
                 eprintln!("REST server crashed: {e:?}");
             }
         });
