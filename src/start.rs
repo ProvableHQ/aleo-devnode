@@ -113,12 +113,12 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
                 println!("Cleaned ledger directory: {}", path.display());
             }
             println!("Using persistent ledger at: {}", path.display());
-            let storage_mode = StorageMode::Custom(path);
+            let storage_mode = StorageMode::Custom(path.clone());
             let ledger: Ledger<TestnetV0, ConsensusDB<TestnetV0>> =
                 tokio::task::spawn_blocking(move || Ledger::load(genesis_block, storage_mode))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load ledger: {e}"))??;
-            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key).await?
+            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key, Some(path)).await?
         }
         None => {
             let storage_mode = StorageMode::new_test(None);
@@ -126,7 +126,7 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
                 tokio::task::spawn_blocking(move || Ledger::load(genesis_block, storage_mode))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load ledger: {e}"))??;
-            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key).await?
+            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key, None).await?
         }
     }
 
@@ -138,13 +138,14 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
     ledger: Ledger<TestnetV0, C>,
     manual_block_creation: bool,
     private_key: PrivateKey<TestnetV0>,
+    storage_path: Option<PathBuf>,
 ) -> Result<()> {
     let rps = 999999999;
 
     // Record the height before handing the ledger off, so we know how far to advance.
     let current_height = ledger.latest_height();
 
-    let rest = Rest::start(socket_addr, rps, ledger, manual_block_creation, private_key)
+    let rest = Rest::start(socket_addr, rps, ledger, manual_block_creation, private_key, storage_path)
         .await
         .expect("Failed to start the REST API server");
     println!("Server running on http://{socket_addr}");

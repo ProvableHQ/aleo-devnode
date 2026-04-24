@@ -35,6 +35,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use std::path::PathBuf;
 use axum_extra::response::ErasedJson;
 
 use parking_lot::Mutex;
@@ -74,6 +75,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>> {
     private_key: PrivateKey<N>,
     /// Sender half of the shutdown channel; consumed on first use.
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// Path to the ledger storage directory; None when running in-memory.
+    storage_path: Option<PathBuf>,
 }
 
 impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
@@ -84,6 +87,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
         ledger: Ledger<N, C>,
         manual_block_creation: bool,
         private_key: PrivateKey<N>,
+        storage_path: Option<PathBuf>,
     ) -> Result<Self> {
         // Initialize the server.
         let mut server = Self {
@@ -95,6 +99,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
             manual_block_creation,
             private_key,
             shutdown_tx: Default::default(),
+            storage_path,
         };
         // Spawn the server.
         server.spawn_server(rest_ip, rest_rps).await?;
@@ -179,7 +184,11 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             .route("/stateRoot/{height}", get(Self::get_state_root))
 
             // POST ../shutdown
-            .route("/shutdown", post(Self::shutdown));
+            .route("/shutdown", post(Self::shutdown))
+
+            // Snapshot endpoints.
+            .route("/snapshot", post(Self::create_snapshot))
+            .route("/snapshots", get(Self::list_snapshots));
 
         routes
             // Pass in `Rest` to make things convenient.
@@ -232,7 +241,12 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         let handle = tokio::spawn(async move {
             let serve = axum::serve(rest_listener, router.into_make_service_with_connect_info::<SocketAddr>())
-                .with_graceful_shutdown(async move { shutdown_rx.await.ok(); });
+                .with_graceful_shutdown(async move {
+                    tokio::select! {
+                        _ = shutdown_rx => {},
+                        _ = shutdown_signal() => {},
+                    }
+                });
             if let Err(e) = serve.await {
                 eprintln!("REST server crashed: {e:?}");
             }
@@ -240,6 +254,28 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         self.handles.lock().push(handle);
         Ok(())
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
 

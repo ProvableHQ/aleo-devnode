@@ -569,6 +569,88 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Ok((StatusCode::OK, ErasedJson::new(tx_id)))
     }
 
+    /// POST /<network>/snapshot
+    /// Body (optional): `{"name": "my-snapshot"}`
+    /// Saves a snapshot of the current ledger to `{storage}-snapshots/{name}/`.
+    /// Returns 400 if the devnode is running in-memory (no storage path).
+    pub(crate) async fn create_snapshot(
+        State(rest): State<Self>,
+        Json(req): Json<serde_json::Value>,
+    ) -> Result<ErasedJson, RestError> {
+        let storage_path = rest.storage_path.clone().ok_or_else(|| {
+            RestError::bad_request(anyhow!("Snapshots require persistent storage (start with --storage)"))
+        })?;
+
+        let height = rest.ledger.latest_height();
+
+        let name = req
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("snapshot-{height}"));
+
+        // Snapshots are stored as siblings of the storage directory: `{storage}-snapshots/{name}`.
+        let snapshots_dir = {
+            let mut p = storage_path.clone();
+            let dir_name = format!("{}-snapshots", p.file_name().unwrap_or_default().to_string_lossy());
+            p.pop();
+            p.join(dir_name)
+        };
+        let snapshot_path = snapshots_dir.join(&name);
+
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&snapshots_dir)
+                .map_err(|e| RestError::internal_server_error(anyhow!("Failed to create snapshots directory: {e}")))?;
+            rest.ledger
+                .backup_database(&snapshot_path)
+                .map_err(|e| RestError::internal_server_error(anyhow!("Failed to create snapshot: {e}")))?;
+            Ok::<_, RestError>(())
+        })
+        .await
+        .map_err(|e| RestError::internal_server_error(anyhow!("Task panicked: {e}")))??;
+
+        Ok(ErasedJson::new(json!({ "name": name, "height": height })))
+    }
+
+    /// GET /<network>/snapshots
+    /// Lists available snapshots alongside the block height recorded in their name.
+    /// Returns 400 if the devnode is running in-memory (no storage path).
+    pub(crate) async fn list_snapshots(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
+        let storage_path = rest.storage_path.clone().ok_or_else(|| {
+            RestError::bad_request(anyhow!("Snapshots require persistent storage (start with --storage)"))
+        })?;
+
+        let snapshots_dir = {
+            let mut p = storage_path.clone();
+            let dir_name = format!("{}-snapshots", p.file_name().unwrap_or_default().to_string_lossy());
+            p.pop();
+            p.join(dir_name)
+        };
+
+        if !snapshots_dir.exists() {
+            return Ok(ErasedJson::new(json!([])));
+        }
+
+        let snapshots = tokio::task::spawn_blocking(move || {
+            let mut entries = vec![];
+            for entry in std::fs::read_dir(&snapshots_dir)
+                .map_err(|e| RestError::internal_server_error(anyhow!("Failed to read snapshots directory: {e}")))?
+            {
+                let entry = entry
+                    .map_err(|e| RestError::internal_server_error(anyhow!("Failed to read snapshot entry: {e}")))?;
+                if entry.path().is_dir() {
+                    entries.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+            entries.sort();
+            Ok::<_, RestError>(entries)
+        })
+        .await
+        .map_err(|e| RestError::internal_server_error(anyhow!("Task panicked: {e}")))??;
+
+        Ok(ErasedJson::new(json!(snapshots)))
+    }
+
     /// POST /<network>/shutdown
     pub(crate) async fn shutdown(State(rest): State<Self>) -> StatusCode {
         tracing::info!("Shutdown requested via REST API");
