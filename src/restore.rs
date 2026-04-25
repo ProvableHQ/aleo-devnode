@@ -17,6 +17,23 @@ pub struct Restore {
     /// Ledger storage directory to restore into (must match the --storage value used when starting).
     #[clap(long, help = "Ledger storage directory to restore into", default_value = "devnode")]
     pub storage: PathBuf,
+    /// Restart the devnode immediately after restoring.
+    #[clap(long, help = "Restart the devnode after restoring")]
+    pub restart: bool,
+
+    // --- Forwarded to `start` when --restart is set ---
+    /// Private key for block creation. Required with --restart if PRIVATE_KEY env var is not set.
+    #[clap(long)]
+    pub private_key: Option<String>,
+    /// REST API bind address.
+    #[clap(short = 'a', long, default_value = "127.0.0.1:3030")]
+    pub socket_addr: String,
+    /// Log verbosity (0-2).
+    #[clap(short = 'v', long, default_value = "2")]
+    pub verbosity: u8,
+    /// Disable automatic block creation after broadcast.
+    #[clap(short = 'm', long)]
+    pub manual_block_creation: bool,
 }
 
 impl Restore {
@@ -45,13 +62,68 @@ impl Restore {
         // Copy the snapshot into the storage directory.
         println!("Restoring '{}' → '{}'...", snapshot_path.display(), self.storage.display());
         copy_dir_all(&snapshot_path, &self.storage)?;
+        println!("Restore complete.");
 
-        println!(
-            "Restore complete. Restart the devnode with:\n  aleo-devnode start --storage {}",
-            self.storage.display()
-        );
+        if self.restart {
+            relaunch_as_start(&self.storage, self.private_key.as_deref(), &self.socket_addr, self.verbosity, self.manual_block_creation)?;
+        } else {
+            println!(
+                "Restart the devnode with:\n  aleo-devnode start --storage {}",
+                self.storage.display()
+            );
+        }
 
         Ok(())
+    }
+}
+
+/// Re-executes the current binary as `aleo-devnode start` with the given parameters.
+/// On Unix this replaces the current process (same PID). On other platforms a child
+/// process is spawned and the current process exits.
+fn relaunch_as_start(
+    storage: &Path,
+    private_key: Option<&str>,
+    socket_addr: &str,
+    verbosity: u8,
+    manual_block_creation: bool,
+) -> Result<()> {
+    let exe = std::env::current_exe().map_err(|e| anyhow!("Failed to locate executable: {e}"))?;
+
+    let mut args = vec![
+        "start".to_string(),
+        "--storage".to_string(),
+        storage.display().to_string(),
+        "--socket-addr".to_string(),
+        socket_addr.to_string(),
+        "--verbosity".to_string(),
+        verbosity.to_string(),
+    ];
+
+    if let Some(pk) = private_key {
+        args.push("--private-key".to_string());
+        args.push(pk.to_string());
+    }
+
+    if manual_block_creation {
+        args.push("--manual-block-creation".to_string());
+    }
+
+    println!("Restarting: {} {}", exe.display(), args.join(" "));
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(&args);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Replaces the current process image — no child process is created.
+        Err(anyhow!("Failed to re-exec: {}", cmd.exec()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        cmd.spawn().map_err(|e| anyhow!("Failed to restart devnode: {e}"))?;
+        std::process::exit(0);
     }
 }
 
