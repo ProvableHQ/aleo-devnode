@@ -60,6 +60,70 @@ This persists the ledger to a `devnode/` directory. To start fresh:
 aleo-devnode start --private-key APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH --storage --clear-storage
 ```
 
+## Snapshots
+
+Snapshots capture the ledger state at a specific block height and can be restored later. They require persistent storage (`--storage`).
+
+Snapshots are saved alongside the storage directory — e.g. if storage is `devnode/`, snapshots are written to `devnode-snapshots/`.
+
+### Take a snapshot
+
+```sh
+curl -X POST http://127.0.0.1:3030/testnet/snapshot \
+     -H "Content-Type: application/json" \
+     -d '{"name": "before-deploy"}'
+```
+
+If no name is provided, the snapshot is named automatically using the current block height (e.g. `snapshot-42`):
+
+```sh
+curl -X POST http://127.0.0.1:3030/testnet/snapshot \
+     -H "Content-Type: application/json" \
+     -d '{}'
+```
+
+Response: `{"name": "before-deploy", "height": 42}`
+
+### List snapshots
+
+```sh
+curl http://127.0.0.1:3030/testnet/snapshots
+```
+
+### Restore a snapshot
+
+The devnode must not be running when restoring. Stop it first, then run:
+
+```sh
+aleo-devnode restore --snapshot before-deploy --storage devnode
+```
+
+The original snapshot directory is left untouched, so the same snapshot can be restored multiple times.
+
+### Restore and restart in one step
+
+```sh
+aleo-devnode restore \
+    --snapshot before-deploy \
+    --storage devnode \
+    --restart \
+    --private-key APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH
+```
+
+If `PRIVATE_KEY` is set in the environment, `--private-key` can be omitted.
+
+### Restore options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--snapshot` | required | Name of the snapshot to restore |
+| `--storage` | `devnode` | Ledger storage directory to restore into |
+| `--restart` | off | Restart the devnode after restoring |
+| `--private-key` | `$PRIVATE_KEY` env var | Private key (forwarded to `start` when `--restart` is set) |
+| `-a, --socket-addr` | `127.0.0.1:3030` | REST API address (forwarded to `start` when `--restart` is set) |
+| `-v, --verbosity` | `2` | Log verbosity (forwarded to `start` when `--restart` is set) |
+| `-m, --manual-block-creation` | off | Disable auto block creation (forwarded to `start` when `--restart` is set) |
+
 ## REST API
 
 The node exposes the standard Aleo REST API under `/<network>/` (e.g. `/testnet/`), with versioned prefixes `/v1/testnet/` and `/v2/testnet/` also available.
@@ -72,9 +136,11 @@ Key endpoints:
 | `GET` | `/testnet/block/latest` | Latest block |
 | `GET` | `/testnet/block/{height_or_hash}` | Block by height or hash |
 | `POST` | `/testnet/transaction/broadcast` | Broadcast a transaction |
-| `POST` | `/testnet/block/create` | Create blocks (body: `{"num_blocks": N}`) |
+| `POST` | `/testnet/block/create` | Create blocks (body: `{"num_blocks": N}`, optional) |
 | `GET` | `/testnet/program/{id}` | Get a deployed program |
 | `GET` | `/testnet/program/{id}/mapping/{name}/{key}` | Get a mapping value |
+| `POST` | `/testnet/snapshot` | Take a snapshot (body: `{"name": "optional"}`) |
+| `GET` | `/testnet/snapshots` | List available snapshots |
 | `POST` | `/testnet/shutdown` | Gracefully shut down the node |
 
 ### Shutdown
@@ -84,3 +150,5 @@ To stop the node gracefully (draining any in-flight requests before exiting):
 ```sh
 curl -X POST http://127.0.0.1:3030/testnet/shutdown
 ```
+
+Ctrl+C and SIGTERM also trigger graceful shutdown.
