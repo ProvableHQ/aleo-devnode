@@ -6,6 +6,7 @@
 mod advance;
 mod logger;
 mod rest;
+mod restore;
 mod start;
 
 use anyhow::Result;
@@ -22,6 +23,11 @@ enum DevnodeCommands {
     Advance {
         #[clap(flatten)]
         command: advance::Advance,
+    },
+    #[clap(name = "restore", about = "Restore the ledger from a snapshot (server must not be running)")]
+    Restore {
+        #[clap(flatten)]
+        command: restore::Restore,
     },
 }
 
@@ -51,5 +57,6 @@ fn run(cli: Cli) -> Result<()> {
             command.execute(cli.private_key)
         }
         DevnodeCommands::Advance { command } => command.execute(),
+        DevnodeCommands::Restore { command } => command.execute(),
     }
 }

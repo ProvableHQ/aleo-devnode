@@ -15,6 +15,7 @@
 // along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
 use super::*;
 
+use crate::restore::snapshots_sibling_dir;
 use snarkvm::prelude::{Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM};
 
 use axum::{Json, extract::rejection::JsonRejection};
@@ -589,13 +590,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("snapshot-{height}"));
 
-        // Snapshots are stored as siblings of the storage directory: `{storage}-snapshots/{name}`.
-        let snapshots_dir = {
-            let mut p = storage_path.clone();
-            let dir_name = format!("{}-snapshots", p.file_name().unwrap_or_default().to_string_lossy());
-            p.pop();
-            p.join(dir_name)
-        };
+        let snapshots_dir = snapshots_sibling_dir(&storage_path);
         let snapshot_path = snapshots_dir.join(&name);
 
         tokio::task::spawn_blocking(move || {
