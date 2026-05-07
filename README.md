@@ -90,6 +90,8 @@ Response: `{"name": "before-deploy", "height": 42}`
 curl http://127.0.0.1:3030/testnet/snapshots
 ```
 
+Response: `["before-deploy", "snapshot-42"]`
+
 ### Restore a snapshot
 
 The devnode must not be running when restoring. Stop it first, then run:
