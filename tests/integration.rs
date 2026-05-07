@@ -3,10 +3,12 @@
 // Each test spawns the binary directly, mirroring the shell-based devnode tests
 // in the leo repo (tests/tests/cli/test_devnode*, leo_devnode_missing_private_key).
 
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU16, Ordering},
+    time::{Duration, Instant},
+};
 
 const PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH";
 const DEVNODE_BIN: &str = env!("CARGO_BIN_EXE_aleo-devnode");
