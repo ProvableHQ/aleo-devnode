@@ -14,8 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::logger::initialize_terminal_logger;
-use crate::rest::Rest;
+use crate::{logger::initialize_terminal_logger, rest::Rest};
 
 use anyhow::Result;
 use clap::Parser;
@@ -82,9 +81,10 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
         .map_err(|e| anyhow::anyhow!("Failed to parse listener address '{}': {}", command.socket_addr, e))?;
     // Load the genesis block.
     let genesis_block: Block<TestnetV0> = if command.genesis_path != "blank" {
-        Block::from_bytes_le(&std::fs::read(&command.genesis_path).map_err(|e| {
-            anyhow::anyhow!("Failed to read genesis block file '{}': {}", command.genesis_path, e)
-        })?)?
+        Block::from_bytes_le(
+            &std::fs::read(&command.genesis_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read genesis block file '{}': {}", command.genesis_path, e))?,
+        )?
     } else {
         // This genesis block is stored in $TMPDIR when running snarkos start --dev 0 --dev-num-validators N
         Block::from_bytes_le(include_bytes!(concat!(
@@ -95,19 +95,17 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
     match command.storage {
         Some(path) => {
             if command.clear_storage && path.exists() {
-                for entry in std::fs::read_dir(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read ledger directory: {e}"))?
+                for entry in
+                    std::fs::read_dir(&path).map_err(|e| anyhow::anyhow!("Failed to read ledger directory: {e}"))?
                 {
                     let entry = entry.map_err(|e| anyhow::anyhow!("Failed to read entry: {e}"))?;
                     let entry_path = entry.path();
                     if entry_path.is_dir() {
-                        std::fs::remove_dir_all(&entry_path).map_err(|e| {
-                            anyhow::anyhow!("Failed to remove '{}': {e}", entry_path.display())
-                        })?;
+                        std::fs::remove_dir_all(&entry_path)
+                            .map_err(|e| anyhow::anyhow!("Failed to remove '{}': {e}", entry_path.display()))?;
                     } else {
-                        std::fs::remove_file(&entry_path).map_err(|e| {
-                            anyhow::anyhow!("Failed to remove '{}': {e}", entry_path.display())
-                        })?;
+                        std::fs::remove_file(&entry_path)
+                            .map_err(|e| anyhow::anyhow!("Failed to remove '{}': {e}", entry_path.display()))?;
                     }
                 }
                 println!("Cleaned ledger directory: {}", path.display());
@@ -173,10 +171,7 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
 
 fn resolve_private_key(private_key: &Option<String>) -> Result<PrivateKey<TestnetV0>> {
     match private_key {
-        Some(pk) => {
-            Ok(PrivateKey::<TestnetV0>::from_str(pk)
-                .map_err(|e| anyhow::anyhow!("Invalid private key: {e}"))?)
-        }
+        Some(pk) => Ok(PrivateKey::<TestnetV0>::from_str(pk).map_err(|e| anyhow::anyhow!("Invalid private key: {e}"))?),
         None => {
             let pk = std::env::var("PRIVATE_KEY").map_err(|e| {
                 anyhow::anyhow!(
@@ -187,8 +182,7 @@ Please either:
 2. Set the PRIVATE_KEY environment variable"
                 )
             })?;
-            Ok(PrivateKey::<TestnetV0>::from_str(&pk)
-                .map_err(|e| anyhow::anyhow!("Invalid private key: {e}"))?)
+            Ok(PrivateKey::<TestnetV0>::from_str(&pk).map_err(|e| anyhow::anyhow!("Invalid private key: {e}"))?)
         }
     }
 }

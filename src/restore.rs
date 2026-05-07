@@ -43,11 +43,7 @@ impl Restore {
         let snapshot_path = snapshots_dir.join(&self.snapshot);
 
         if !snapshot_path.exists() {
-            return Err(anyhow!(
-                "Snapshot '{}' not found at '{}'",
-                self.snapshot,
-                snapshot_path.display()
-            ));
+            return Err(anyhow!("Snapshot '{}' not found at '{}'", self.snapshot, snapshot_path.display()));
         }
 
         // Clear the current storage directory, preserving the directory itself.
@@ -55,8 +51,7 @@ impl Restore {
             println!("Clearing storage directory: {}", self.storage.display());
             clear_dir(&self.storage)?;
         } else {
-            std::fs::create_dir_all(&self.storage)
-                .map_err(|e| anyhow!("Failed to create storage directory: {e}"))?;
+            std::fs::create_dir_all(&self.storage).map_err(|e| anyhow!("Failed to create storage directory: {e}"))?;
         }
 
         // Copy the snapshot into the storage directory.
@@ -65,12 +60,15 @@ impl Restore {
         println!("Restore complete.");
 
         if self.restart {
-            relaunch_as_start(&self.storage, self.private_key.as_deref(), &self.socket_addr, self.verbosity, self.manual_block_creation)?;
+            relaunch_as_start(
+                &self.storage,
+                self.private_key.as_deref(),
+                &self.socket_addr,
+                self.verbosity,
+                self.manual_block_creation,
+            )?;
         } else {
-            println!(
-                "Restart the devnode with:\n  aleo-devnode start --storage {}",
-                self.storage.display()
-            );
+            println!("Restart the devnode with:\n  aleo-devnode start --storage {}", self.storage.display());
         }
 
         Ok(())
@@ -130,10 +128,7 @@ fn relaunch_as_start(
 /// Returns the snapshots directory that sits alongside the given storage directory.
 /// e.g. `devnode` → `devnode-snapshots`
 pub(crate) fn snapshots_sibling_dir(storage: &Path) -> PathBuf {
-    let dir_name = format!(
-        "{}-snapshots",
-        storage.file_name().unwrap_or_default().to_string_lossy()
-    );
+    let dir_name = format!("{}-snapshots", storage.file_name().unwrap_or_default().to_string_lossy());
     let mut p = storage.to_path_buf();
     p.pop();
     p.join(dir_name)
@@ -144,11 +139,9 @@ fn clear_dir(dir: &Path) -> Result<()> {
         let entry = entry.map_err(|e| anyhow!("Failed to read entry: {e}"))?;
         let path = entry.path();
         if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-                .map_err(|e| anyhow!("Failed to remove '{}': {e}", path.display()))?;
+            std::fs::remove_dir_all(&path).map_err(|e| anyhow!("Failed to remove '{}': {e}", path.display()))?;
         } else {
-            std::fs::remove_file(&path)
-                .map_err(|e| anyhow!("Failed to remove '{}': {e}", path.display()))?;
+            std::fs::remove_file(&path).map_err(|e| anyhow!("Failed to remove '{}': {e}", path.display()))?;
         }
     }
     Ok(())
@@ -163,8 +156,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         if src_path.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| anyhow!("Failed to copy '{}': {e}", src_path.display()))?;
+            std::fs::copy(&src_path, &dst_path).map_err(|e| anyhow!("Failed to copy '{}': {e}", src_path.display()))?;
         }
     }
     Ok(())

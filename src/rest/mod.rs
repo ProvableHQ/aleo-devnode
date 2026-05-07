@@ -35,8 +35,8 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use std::path::PathBuf;
 use axum_extra::response::ErasedJson;
+use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use std::{
