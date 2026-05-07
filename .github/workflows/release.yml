@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0). Creates the git tag if it does not already exist."
+        required: true
+
+env:
+  RUST_BACKTRACE: 0
+
+jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Tag and Version
+        id: resolve
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          TOML_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+          if [ "$VERSION" != "$TOML_VERSION" ]; then
+            echo "::error::Tag version ($VERSION) does not match Cargo.toml version ($TOML_VERSION)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Tag Exists
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-14-large
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Add aarch64 target
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: rustup target add aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y libclang-dev
+
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "11"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/lib" >> $GITHUB_ENV
+
+      - name: Verify Cargo.lock exists
+        shell: bash
+        run: test -f Cargo.lock || (echo "::error::Cargo.lock is missing" && exit 1)
+
+      - name: Build
+        shell: bash
+        run: |
+          TARGET_FLAG=""
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            TARGET_FLAG="--target aarch64-apple-darwin"
+          fi
+          cargo build --release --locked $TARGET_FLAG
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            BIN="target/aarch64-apple-darwin/release/aleo-devnode"
+          else
+            BIN="target/release/aleo-devnode"
+          fi
+          strip "$BIN"
+          ARCHIVE="aleo-devnode-${TAG}-${{ matrix.target }}.zip"
+          zip -j "$ARCHIVE" "$BIN"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          $archive = "aleo-devnode-${tag}-${{ matrix.target }}.zip"
+          Compress-Archive -Path target/release/aleo-devnode.exe -DestinationPath $archive
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    name: Publish Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: "v${{ needs.prepare.outputs.version }}"
+          files: "*.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
