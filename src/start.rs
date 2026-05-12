@@ -92,6 +92,7 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
             "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
         )))?
     };
+    let manual_block_creation = command.manual_block_creation;
     match command.storage {
         Some(path) => {
             if command.clear_storage && path.exists() {
@@ -116,7 +117,7 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
                 tokio::task::spawn_blocking(move || Ledger::load(genesis_block, storage_mode))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load ledger: {e}"))??;
-            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key, Some(path)).await?
+            run_devnode(socket_addr, ledger, manual_block_creation, private_key, Some(path)).await?
         }
         None => {
             let storage_mode = StorageMode::new_test(None);
@@ -124,7 +125,7 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
                 tokio::task::spawn_blocking(move || Ledger::load(genesis_block, storage_mode))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load ledger: {e}"))??;
-            run_devnode(socket_addr, ledger, command.manual_block_creation, private_key, None).await?
+            run_devnode(socket_addr, ledger, manual_block_creation, private_key, None).await?
         }
     }
 

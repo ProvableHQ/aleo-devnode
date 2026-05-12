@@ -32,6 +32,32 @@ The node starts a REST API on `http://127.0.0.1:3030` by default and automatical
 | `-s, --storage [DIR]` | in-memory | Persist the ledger to disk at `DIR` (default: `devnode/`) |
 | `-c, --clear-storage` | off | Clear the storage directory before starting (requires `-s`) |
 
+### Pre-funded accounts
+
+The built-in genesis block seeds 50 accounts with funds for testing. The first five are:
+
+| # | Address | Private Key |
+|---|---------|-------------|
+| 0 | `aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px` | `APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH` |
+| 1 | `aleo1s3ws5tra87fjycnjrwsjcrnw2qxr8jfqqdugnf0xzqqw29q9m5pqem2u4t` | `APrivateKey1zkp2RWGDcde3efb89rjhME1VYA8QMxcxep5DShNBR6n8Yjh` |
+| 2 | `aleo1ashyu96tjwe63u0gtnnv8z5lhapdu4l5pjsl2kha7fv7hvz2eqxs5dz0rg` | `APrivateKey1zkp2GUmKbVsuc1NSj28pa1WTQuZaK5f1DQJAT6vPcHyWokG` |
+| 3 | `aleo12ux3gdauck0v60westgcpqj7v8rrcr3v346e4jtq04q7kkt22czsh808v2` | `APrivateKey1zkpBjpEgLo4arVUkQmcLdKQMiAKGaHAQVVwmF8HQby8vdYs` |
+| 4 | `aleo1p9sg8gapg22p3j42tang7c8kqzp4lhe6mg77gx32yys2a5y7pq9sxh6wrd` | `APrivateKey1zkp3J6rRrDEDKAMMzSQmkBqd3vPbjp4XTyH7oMKFn7eVFwf` |
+
+> ⚠️ These are development keys. Never use them in production.
+
+To list all 50 accounts:
+
+```sh
+aleo-devnode accounts
+```
+
+If you are using a custom genesis block, query block 0 to inspect funded accounts:
+
+```sh
+curl http://127.0.0.1:3030/testnet/block/0
+```
+
 ### Advance the ledger manually
 
 When running with `--manual-block-creation`, use `advance` to create blocks explicitly:
