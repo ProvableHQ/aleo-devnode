@@ -1,6 +1,6 @@
 # aleo-devnode
 
-A standalone Aleo development node for local testing and development.
+The devnode is a standalone Aleo development node for local testing and development. Unlike a production node, it **does not verify proofs**. This means transactions can be built with placeholder proofs (for executions) and placeholder verifying keys (for deployments and upgrades), making quick local iteration and fast end-to-end testing by bypassing proof generation when creating a transaction.
 
 ## Build
 
@@ -85,6 +85,28 @@ This persists the ledger to a `devnode/` directory. To start fresh:
 ```sh
 aleo-devnode start --private-key APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH --storage --clear-storage
 ```
+
+## Building transactions for devnode
+
+### Leo CLI
+
+Add the appropriate flag when building transactions against a devnode:
+
+| Command | Flag | Description |
+|---------|------|-------------|
+| `leo execute` | `--skip-execute-proof` | Skips execution proof generation |
+| `leo deploy` | `--skip-deploy-certificate` | Skips verifying key certificate for deployment |
+| `leo upgrade` | `--skip-deploy-certificate` | Skips verifying key certificate for upgrade |
+
+### JavaScript/TypeScript SDK
+
+Use the dedicated devnode transaction builder methods in [`ProgramManager`](https://github.com/ProvableHQ/sdk/blob/5a50b6f5a7f23ff48933557dfdc51315912e79ba/sdk/src/program-manager.ts):
+
+| Method | Description |
+|--------|-------------|
+| [`buildDevnodeExecutionTransaction`](https://github.com/ProvableHQ/sdk/blob/5a50b6f5a7f23ff48933557dfdc51315912e79ba/sdk/src/program-manager.ts#L3425) | Builds an execution transaction with a placeholder proof |
+| [`buildDevnodeDeploymentTransaction`](https://github.com/ProvableHQ/sdk/blob/5a50b6f5a7f23ff48933557dfdc51315912e79ba/sdk/src/program-manager.ts#L3598) | Builds a deployment transaction with a placeholder verifying key |
+| [`buildDevnodeUpgradeTransaction`](https://github.com/ProvableHQ/sdk/blob/5a50b6f5a7f23ff48933557dfdc51315912e79ba/sdk/src/program-manager.ts#L3735) | Builds an upgrade transaction with a placeholder verifying key |
 
 ## Snapshots
 
