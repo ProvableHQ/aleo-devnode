@@ -3,6 +3,7 @@
 //
 // Licensed under the GNU General Public License v3.0.
 
+mod accounts;
 mod advance;
 mod logger;
 mod rest;
@@ -28,6 +29,11 @@ enum DevnodeCommands {
     Restore {
         #[clap(flatten)]
         command: restore::Restore,
+    },
+    #[clap(name = "accounts", about = "List all pre-funded development accounts for the built-in genesis block")]
+    Accounts {
+        #[clap(flatten)]
+        command: accounts::Accounts,
     },
 }
 
@@ -58,5 +64,6 @@ fn run(cli: Cli) -> Result<()> {
         }
         DevnodeCommands::Advance { command } => command.execute(),
         DevnodeCommands::Restore { command } => command.execute(),
+        DevnodeCommands::Accounts { command } => command.execute(),
     }
 }
