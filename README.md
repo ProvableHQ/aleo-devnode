@@ -189,6 +189,7 @@ Key endpoints:
 | `POST` | `/testnet/block/create` | Create blocks (body: `{"num_blocks": N}`, optional) |
 | `GET` | `/testnet/program/{id}` | Get a deployed program |
 | `GET` | `/testnet/program/{id}/mapping/{name}/{key}` | Get a mapping value |
+| `GET` | `/testnet/program/{id}/mapping/{name}?all=true` | Get all key-value pairs in a mapping |
 | `POST` | `/testnet/snapshot` | Take a snapshot (body: `{"name": "optional"}`) |
 | `GET` | `/testnet/snapshots` | List available snapshots |
 | `POST` | `/testnet/shutdown` | Gracefully shut down the node |
