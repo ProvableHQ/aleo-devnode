@@ -37,11 +37,18 @@ impl Advance {
             "num_blocks": self.num_blocks,
         });
 
-        let _response = client
+        let response = client
             .post(format!("http://{}/testnet/block/create", self.socket_addr))
             .header("Content-Type", "application/json")
             .json(&payload)
-            .send();
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to reach devnode at {}: {e}", self.socket_addr))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(anyhow::anyhow!("Advance failed ({status}): {body}"));
+        }
 
         Ok(())
     }

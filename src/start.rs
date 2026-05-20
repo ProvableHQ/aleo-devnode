@@ -61,7 +61,8 @@ pub struct Start {
 
 impl Start {
     pub fn execute(self, private_key: Option<String>) -> Result<()> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create async runtime: {e}"))?;
         rt.block_on(async { start_devnode(self, private_key).await })
     }
 }
@@ -150,18 +151,25 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
     println!("Server running on http://{socket_addr}");
 
     if !manual_block_creation {
-        let last_height = TEST_CONSENSUS_VERSION_HEIGHTS.last().unwrap().1;
-        let blocks_to_advance = last_height.saturating_sub(current_height);
+        let target_height = TEST_CONSENSUS_VERSION_HEIGHTS.last().map(|&(_, h)| h).unwrap_or(0);
+        let blocks_to_advance = target_height.saturating_sub(current_height);
         if blocks_to_advance > 0 {
             println!("Advancing the Devnode to the latest consensus version");
             let client = reqwest::Client::new();
             let payload = json!({ "num_blocks": blocks_to_advance });
-            let _response = client
+            match client
                 .post(format!("http://{}/testnet/block/create", socket_addr))
                 .header("Content-Type", "application/json")
                 .json(&payload)
                 .send()
-                .await;
+                .await
+            {
+                Ok(r) if !r.status().is_success() => {
+                    tracing::warn!("Auto-advance to consensus version failed with status {}", r.status());
+                }
+                Err(e) => tracing::warn!("Auto-advance to consensus version failed: {e}"),
+                Ok(_) => {}
+            }
         }
     }
 

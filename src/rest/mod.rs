@@ -124,17 +124,12 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         let governor_layer =
             GovernorLayer::new(governor_config).error_handler(|error: tower_governor::errors::GovernorError| {
-                // Properly return a 429 Too Many Requests error
-                let error_message = error.to_string();
-
-                let mut response = axum::response::Response::new(error_message.clone().into());
-
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-
-                if error_message.contains("Too Many Requests") {
-                    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-                }
-
+                let status = match &error {
+                    tower_governor::errors::GovernorError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                let mut response = axum::response::Response::new(error.to_string().into());
+                *response.status_mut() = status;
                 response
             });
 
