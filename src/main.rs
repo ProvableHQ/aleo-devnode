@@ -3,6 +3,8 @@
 //
 // Licensed under the GNU General Public License v3.0.
 
+#![forbid(unsafe_code)]
+
 mod accounts;
 mod advance;
 mod logger;

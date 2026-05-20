@@ -1,18 +1,8 @@
 // Copyright (C) 2019-2026 Provable Inc.
-// This file is part of the Leo library.
+// This file is part of the aleo-devnode tool.
+//
+// Licensed under the GNU General Public License v3.0.
 
-// The Leo library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// The Leo library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
 use super::*;
 
 use crate::restore::snapshots_sibling_dir;
@@ -26,6 +16,12 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
+
+/// Maps a snarkvm ledger error to a REST error, returning 404 for missing items.
+/// snarkvm returns `anyhow::Error` without typed variants, so the message text is the only signal.
+fn ledger_err(err: anyhow::Error) -> RestError {
+    if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
+}
 
 /// Deserialize a CSV string into a vector of strings.
 fn de_csv<'de, D>(de: D) -> std::result::Result<Vec<String>, D::Error>
@@ -190,9 +186,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_transaction(tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_transaction(tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/transaction/confirmed/{transactionID}
@@ -201,9 +195,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_confirmed_transaction(tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_confirmed_transaction(tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/transaction/unconfirmed/{transactionID}
@@ -212,9 +204,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/program/{programID}
@@ -581,7 +571,9 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         let name = req.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
         if let Some(ref n) = name {
             if n.contains('/') || n.contains('\\') || n.contains("..") {
-                return Err(RestError::bad_request(anyhow!("Invalid snapshot name: must not contain path separators or '..'")));
+                return Err(RestError::bad_request(anyhow!(
+                    "Invalid snapshot name: must not contain path separators or '..'"
+                )));
             }
         }
         let name = name.unwrap_or_else(|| format!("snapshot-{height}"));
@@ -638,10 +630,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
     }
 
     /// POST /<network>/shutdown
-    pub(crate) async fn shutdown(
-        ConnectInfo(addr): ConnectInfo<SocketAddr>,
-        State(rest): State<Self>,
-    ) -> StatusCode {
+    pub(crate) async fn shutdown(ConnectInfo(addr): ConnectInfo<SocketAddr>, State(rest): State<Self>) -> StatusCode {
         if !addr.ip().is_loopback() {
             return StatusCode::FORBIDDEN;
         }
