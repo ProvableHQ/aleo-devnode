@@ -29,7 +29,7 @@ pub struct Restore {
     #[clap(short = 'a', long, default_value = "127.0.0.1:3030")]
     pub socket_addr: String,
     /// Log verbosity (0-2).
-    #[clap(short = 'v', long, default_value = "2")]
+    #[clap(short = 'v', long, default_value = "2", value_parser = clap::value_parser!(u8).range(0..=2))]
     pub verbosity: u8,
     /// Disable automatic block creation after broadcast.
     #[clap(short = 'm', long)]

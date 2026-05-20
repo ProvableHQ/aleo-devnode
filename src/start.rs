@@ -29,7 +29,7 @@ use snarkvm::{
 #[group(id = "start_args")]
 pub struct Start {
     /// Verbosity level for logging (0-2).
-    #[clap(short = 'v', long, help = "devnode verbosity (0-2)", default_value = "2")]
+    #[clap(short = 'v', long, help = "devnode verbosity (0-2)", default_value = "2", value_parser = clap::value_parser!(u8).range(0..=2))]
     pub(crate) verbosity: u8,
     /// Address to bind the Devnode REST API server to.
     #[clap(short = 'a', long, help = "devnode REST API server address", default_value = "127.0.0.1:3030")]
