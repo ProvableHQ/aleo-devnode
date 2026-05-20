@@ -39,8 +39,11 @@ enum DevnodeCommands {
 
 /// A standalone Aleo development node.
 #[derive(Parser, Debug)]
-#[clap(name = "aleo-devnode", about = "A standalone Aleo development node")]
+#[clap(name = "aleo-devnode", about = "A standalone Aleo development node", version, disable_version_flag = true)]
 struct Cli {
+    /// Print version
+    #[clap(short = 'v', long, action = clap::ArgAction::Version)]
+    version: bool,
     /// Private key for block creation. Overrides the PRIVATE_KEY environment variable.
     #[clap(long, global = true)]
     private_key: Option<String>,
