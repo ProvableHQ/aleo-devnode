@@ -9,6 +9,7 @@ mod logger;
 mod rest;
 mod restore;
 mod start;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
@@ -35,6 +36,11 @@ enum DevnodeCommands {
         #[clap(flatten)]
         command: accounts::Accounts,
     },
+    #[clap(name = "update", about = "Update aleo-devnode to the latest version")]
+    Update {
+        #[clap(flatten)]
+        command: update::UpdateCommand,
+    },
 }
 
 /// A standalone Aleo development node.
@@ -42,8 +48,8 @@ enum DevnodeCommands {
 #[clap(name = "aleo-devnode", about = "A standalone Aleo development node", version, disable_version_flag = true)]
 struct Cli {
     /// Print version
-    #[clap(short = 'v', long, action = clap::ArgAction::Version)]
-    version: bool,
+    #[clap(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     /// Private key for block creation. Overrides the PRIVATE_KEY environment variable.
     #[clap(long, global = true)]
     private_key: Option<String>,
@@ -68,5 +74,6 @@ fn run(cli: Cli) -> Result<()> {
         DevnodeCommands::Advance { command } => command.execute(),
         DevnodeCommands::Restore { command } => command.execute(),
         DevnodeCommands::Accounts { command } => command.execute(),
+        DevnodeCommands::Update { command } => command.execute(),
     }
 }
