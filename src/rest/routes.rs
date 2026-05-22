@@ -528,6 +528,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             // Prepare and advance in a single blocking task to prevent concurrent broadcasts
             // from both preparing a block at the same height and racing to advance the ledger.
             tokio::task::spawn_blocking(move || {
+                let _guard = rest.block_creation_lock.lock();
                 let new_block = rest
                     .ledger
                     .prepare_advance_to_next_beacon_block(
@@ -659,6 +660,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         // Iterate and create the specified number of blocks.
         // Return the last created block.
         let last_block = tokio::task::spawn_blocking(move || -> Result<ErasedJson, RestError> {
+            let _guard = rest.block_creation_lock.lock();
             let mut last_block = None;
 
             // Take all unconfirmed transactions from the buffer.

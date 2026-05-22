@@ -62,6 +62,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>> {
     manual_block_creation: bool,
     /// The Private Key used for block creation.
     private_key: PrivateKey<N>,
+    /// Serializes all prepare+advance ledger operations to prevent concurrent block creation races.
+    block_creation_lock: Arc<Mutex<()>>,
     /// Sender half of the shutdown channel; consumed on first use.
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     /// Path to the ledger storage directory; None when running in-memory.
@@ -87,6 +89,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
             num_verifying_executions: Default::default(),
             manual_block_creation,
             private_key,
+            block_creation_lock: Default::default(),
             shutdown_tx: Default::default(),
             storage_path,
         };
