@@ -1,18 +1,7 @@
 // Copyright (C) 2019-2026 Provable Inc.
-// This file is part of the Leo library.
-
-// The Leo library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// The Leo library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
+// This file is part of the aleo-devnode tool.
+//
+// Licensed under the GNU General Public License v3.0.
 
 use anyhow::Result;
 use clap::Parser;
@@ -37,11 +26,18 @@ impl Advance {
             "num_blocks": self.num_blocks,
         });
 
-        let _response = client
+        let response = client
             .post(format!("http://{}/testnet/block/create", self.socket_addr))
             .header("Content-Type", "application/json")
             .json(&payload)
-            .send();
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to reach devnode at {}: {e}", self.socket_addr))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(anyhow::anyhow!("Advance failed ({status}): {body}"));
+        }
 
         Ok(())
     }

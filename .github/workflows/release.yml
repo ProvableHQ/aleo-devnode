@@ -150,10 +150,15 @@ jobs:
           pattern: release-*
           merge-multiple: true
 
+      - name: Generate Checksums
+        run: sha256sum *.zip > sha256sums.txt
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: "v${{ needs.prepare.outputs.version }}"
-          files: "*.zip"
+          files: |
+            *.zip
+            sha256sums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

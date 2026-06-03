@@ -29,7 +29,7 @@ pub struct Restore {
     #[clap(short = 'a', long, default_value = "127.0.0.1:3030")]
     pub socket_addr: String,
     /// Log verbosity (0-2).
-    #[clap(short = 'v', long, default_value = "2")]
+    #[clap(short = 'v', long, default_value = "2", value_parser = clap::value_parser!(u8).range(0..=2))]
     pub verbosity: u8,
     /// Disable automatic block creation after broadcast.
     #[clap(short = 'm', long)]
@@ -97,11 +97,6 @@ fn relaunch_as_start(
         verbosity.to_string(),
     ];
 
-    if let Some(pk) = private_key {
-        args.push("--private-key".to_string());
-        args.push(pk.to_string());
-    }
-
     if manual_block_creation {
         args.push("--manual-block-creation".to_string());
     }
@@ -110,6 +105,10 @@ fn relaunch_as_start(
 
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(&args);
+    // Pass the private key via environment variable to keep it out of the process list.
+    if let Some(pk) = private_key {
+        cmd.env("PRIVATE_KEY", pk);
+    }
 
     #[cfg(unix)]
     {

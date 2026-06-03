@@ -1,18 +1,7 @@
 // Copyright (C) 2019-2026 Provable Inc.
-// This file is part of the Leo library.
-
-// The Leo library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// The Leo library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
+// This file is part of the aleo-devnode tool.
+//
+// Licensed under the GNU General Public License v3.0.
 
 #![forbid(unsafe_code)]
 
@@ -73,6 +62,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>> {
     manual_block_creation: bool,
     /// The Private Key used for block creation.
     private_key: PrivateKey<N>,
+    /// Serializes all prepare+advance ledger operations to prevent concurrent block creation races.
+    block_creation_lock: Arc<Mutex<()>>,
     /// Sender half of the shutdown channel; consumed on first use.
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     /// Path to the ledger storage directory; None when running in-memory.
@@ -98,6 +89,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>> Rest<N, C> {
             num_verifying_executions: Default::default(),
             manual_block_creation,
             private_key,
+            block_creation_lock: Default::default(),
             shutdown_tx: Default::default(),
             storage_path,
         };
@@ -124,17 +116,12 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         let governor_layer =
             GovernorLayer::new(governor_config).error_handler(|error: tower_governor::errors::GovernorError| {
-                // Properly return a 429 Too Many Requests error
-                let error_message = error.to_string();
-
-                let mut response = axum::response::Response::new(error_message.clone().into());
-
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-
-                if error_message.contains("Too Many Requests") {
-                    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-                }
-
+                let status = match &error {
+                    tower_governor::errors::GovernorError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                let mut response = axum::response::Response::new(error.to_string().into());
+                *response.status_mut() = status;
                 response
             });
 

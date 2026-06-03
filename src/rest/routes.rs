@@ -1,18 +1,8 @@
 // Copyright (C) 2019-2026 Provable Inc.
-// This file is part of the Leo library.
+// This file is part of the aleo-devnode tool.
+//
+// Licensed under the GNU General Public License v3.0.
 
-// The Leo library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// The Leo library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
 use super::*;
 
 use crate::restore::snapshots_sibling_dir;
@@ -26,6 +16,12 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
+
+/// Maps a snarkvm ledger error to a REST error, returning 404 for missing items.
+/// snarkvm returns `anyhow::Error` without typed variants, so the message text is the only signal.
+fn ledger_err(err: anyhow::Error) -> RestError {
+    if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
+}
 
 /// Deserialize a CSV string into a vector of strings.
 fn de_csv<'de, D>(de: D) -> std::result::Result<Vec<String>, D::Error>
@@ -190,9 +186,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_transaction(tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_transaction(tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/transaction/confirmed/{transactionID}
@@ -201,9 +195,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_confirmed_transaction(tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_confirmed_transaction(tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/transaction/unconfirmed/{transactionID}
@@ -212,9 +204,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::new(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| {
-            if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
-        })?))
+        Ok(ErasedJson::new(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| ledger_err(err))?))
     }
 
     /// GET /<network>/program/{programID}
@@ -535,11 +525,12 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         }
         // Create a block with the transaction if the manual block creation feature is not enabled.
         if !rest.manual_block_creation {
-            // Clone the ledger for the blocking task
-            let ledger = rest.ledger.clone();
-            // Wrap blocking operations in spawn_blocking
-            let new_block = tokio::task::spawn_blocking(move || {
-                ledger
+            // Prepare and advance in a single blocking task to prevent concurrent broadcasts
+            // from both preparing a block at the same height and racing to advance the ledger.
+            tokio::task::spawn_blocking(move || {
+                let _guard = rest.block_creation_lock.lock();
+                let new_block = rest
+                    .ledger
                     .prepare_advance_to_next_beacon_block(
                         &rest.private_key,
                         vec![],
@@ -547,13 +538,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                         vec![tx],
                         &mut rand::thread_rng(),
                     )
-                    .map_err(|e| anyhow!("{e}"))
-            })
-            .await
-            .map_err(|e| RestError::internal_server_error(anyhow!("Task panicked: {}", e)))??;
-
-            // Advance to the next block.
-            tokio::task::spawn_blocking(move || {
+                    .map_err(|e| anyhow!("{e}"))?;
                 rest.ledger.advance_to_next_block(&new_block).map_err(|e| anyhow!("{e}"))
             })
             .await
@@ -584,11 +569,15 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         let height = rest.ledger.latest_height();
 
-        let name = req
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("snapshot-{height}"));
+        let name = req.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        if let Some(ref n) = name {
+            if n.contains('/') || n.contains('\\') || n.contains("..") {
+                return Err(RestError::bad_request(anyhow!(
+                    "Invalid snapshot name: must not contain path separators or '..'"
+                )));
+            }
+        }
+        let name = name.unwrap_or_else(|| format!("snapshot-{height}"));
 
         let snapshots_dir = snapshots_sibling_dir(&storage_path);
         let snapshot_path = snapshots_dir.join(&name);
@@ -615,12 +604,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             RestError::bad_request(anyhow!("Snapshots require persistent storage (start with --storage)"))
         })?;
 
-        let snapshots_dir = {
-            let mut p = storage_path.clone();
-            let dir_name = format!("{}-snapshots", p.file_name().unwrap_or_default().to_string_lossy());
-            p.pop();
-            p.join(dir_name)
-        };
+        let snapshots_dir = snapshots_sibling_dir(&storage_path);
 
         if !snapshots_dir.exists() {
             return Ok(ErasedJson::new(json!([])));
@@ -647,7 +631,10 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
     }
 
     /// POST /<network>/shutdown
-    pub(crate) async fn shutdown(State(rest): State<Self>) -> StatusCode {
+    pub(crate) async fn shutdown(ConnectInfo(addr): ConnectInfo<SocketAddr>, State(rest): State<Self>) -> StatusCode {
+        if !addr.ip().is_loopback() {
+            return StatusCode::FORBIDDEN;
+        }
         tracing::info!("Shutdown requested via REST API");
         if let Some(tx) = rest.shutdown_tx.lock().take() {
             let _ = tx.send(());
@@ -662,10 +649,18 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
     ) -> Result<ErasedJson, RestError> {
         // Determine the number of blocks to create.
         let num_blocks = req.num_blocks.unwrap_or(1);
+        if num_blocks == 0 {
+            return Err(RestError::bad_request(anyhow!("num_blocks must be at least 1")));
+        }
+        const MAX_BLOCKS_PER_REQUEST: u32 = 1000;
+        if num_blocks > MAX_BLOCKS_PER_REQUEST {
+            return Err(RestError::bad_request(anyhow!("num_blocks exceeds maximum ({MAX_BLOCKS_PER_REQUEST})")));
+        }
 
         // Iterate and create the specified number of blocks.
         // Return the last created block.
         let last_block = tokio::task::spawn_blocking(move || -> Result<ErasedJson, RestError> {
+            let _guard = rest.block_creation_lock.lock();
             let mut last_block = None;
 
             // Take all unconfirmed transactions from the buffer.

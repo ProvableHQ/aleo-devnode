@@ -1,18 +1,7 @@
 // Copyright (C) 2019-2026 Provable Inc.
-// This file is part of the Leo library.
-
-// The Leo library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// The Leo library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with the Leo library. If not, see <https://www.gnu.org/licenses/>.
+// This file is part of the aleo-devnode tool.
+//
+// Licensed under the GNU General Public License v3.0.
 
 use crate::{logger::initialize_terminal_logger, rest::Rest};
 
@@ -40,7 +29,7 @@ use snarkvm::{
 #[group(id = "start_args")]
 pub struct Start {
     /// Verbosity level for logging (0-2).
-    #[clap(short = 'v', long, help = "devnode verbosity (0-2)", default_value = "2")]
+    #[clap(short = 'v', long, help = "devnode verbosity (0-2)", default_value = "2", value_parser = clap::value_parser!(u8).range(0..=2))]
     pub(crate) verbosity: u8,
     /// Address to bind the Devnode REST API server to.
     #[clap(short = 'a', long, help = "devnode REST API server address", default_value = "127.0.0.1:3030")]
@@ -61,7 +50,7 @@ pub struct Start {
 
 impl Start {
     pub fn execute(self, private_key: Option<String>) -> Result<()> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(|e| anyhow::anyhow!("Failed to create async runtime: {e}"))?;
         rt.block_on(async { start_devnode(self, private_key).await })
     }
 }
@@ -150,18 +139,25 @@ async fn run_devnode<C: 'static + ConsensusStorage<TestnetV0>>(
     println!("Server running on http://{socket_addr}");
 
     if !manual_block_creation {
-        let last_height = TEST_CONSENSUS_VERSION_HEIGHTS.last().unwrap().1;
-        let blocks_to_advance = last_height.saturating_sub(current_height);
+        let target_height = TEST_CONSENSUS_VERSION_HEIGHTS.last().map(|&(_, h)| h).unwrap_or(0);
+        let blocks_to_advance = target_height.saturating_sub(current_height);
         if blocks_to_advance > 0 {
             println!("Advancing the Devnode to the latest consensus version");
             let client = reqwest::Client::new();
             let payload = json!({ "num_blocks": blocks_to_advance });
-            let _response = client
+            match client
                 .post(format!("http://{}/testnet/block/create", socket_addr))
                 .header("Content-Type", "application/json")
                 .json(&payload)
                 .send()
-                .await;
+                .await
+            {
+                Ok(r) if !r.status().is_success() => {
+                    tracing::warn!("Auto-advance to consensus version failed with status {}", r.status());
+                }
+                Err(e) => tracing::warn!("Auto-advance to consensus version failed: {e}"),
+                Ok(_) => {}
+            }
         }
     }
 
