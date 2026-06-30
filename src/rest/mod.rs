@@ -188,7 +188,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             .layer(middleware::map_request(log_middleware))
             // Enable CORS.
             .layer(cors)
-            // Cap the request body size at 2MiB to match snarkVM V14's 768 KiB binary transaction limit.
+            // Cap the request body size at 1.5MiB.
             .layer(DefaultBodyLimit::max(2 * 768 * 1024))
             .layer(governor_layer)
     }

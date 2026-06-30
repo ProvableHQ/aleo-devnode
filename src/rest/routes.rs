@@ -533,7 +533,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             // Perform the check.
             let res = rest
                 .ledger
-                .check_transaction_basic(&tx, None, &mut rand::thread_rng())
+                .check_transaction_basic(&tx, None, &mut rand::rng())
                 .map_err(|err| RestError::unprocessable_entity(err.context("Invalid transaction")));
 
             // Release the slot.
@@ -554,7 +554,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                         vec![],
                         vec![],
                         vec![tx],
-                        &mut rand::thread_rng(),
+                        &mut rand::rng(),
                     )
                     .map_err(|e| anyhow!("{e}"))?;
                 rest.ledger.advance_to_next_block(&new_block).map_err(|e| anyhow!("{e}"))
@@ -699,7 +699,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                         vec![],
                         vec![],
                         txs,
-                        &mut rand::thread_rng(),
+                        &mut rand::rng(),
                     )
                     .map_err(|e| RestError::internal_server_error(anyhow!("Failed to prepare block: {}", e)))?;
 
@@ -786,7 +786,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             )?;
 
             let stack = rest.ledger.vm().process().get_stack(program_id)?;
-            let outputs = stack.evaluate_view(state, rest.ledger.vm().finalize_store(), &view_name, inputs)?;Expand commentComment on line R651Resolved
+            let outputs = stack.evaluate_view(state, rest.ledger.vm().finalize_store(), &view_name, inputs)?;
 
             Ok::<_, anyhow::Error>((outputs, height))
         })
