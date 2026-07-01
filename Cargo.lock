@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aleo-devnode"
-version = "0.3.0"
+version = "0.2.0"
 dependencies = [
  "aleo-std-storage",
  "anyhow",
