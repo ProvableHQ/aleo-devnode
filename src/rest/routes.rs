@@ -549,13 +549,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                 let _guard = rest.block_creation_lock.lock();
                 let new_block = rest
                     .ledger
-                    .prepare_advance_to_next_beacon_block(
-                        &rest.private_key,
-                        vec![],
-                        vec![],
-                        vec![tx],
-                        &mut rand::rng(),
-                    )
+                    .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], vec![tx], &mut rand::rng())
                     .map_err(|e| anyhow!("{e}"))?;
                 rest.ledger.advance_to_next_block(&new_block).map_err(|e| anyhow!("{e}"))
             })
@@ -694,13 +688,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                 // If there are no transactions left in the buffer, create an empty block.
                 let new_block = rest
                     .ledger
-                    .prepare_advance_to_next_beacon_block(
-                        &rest.private_key,
-                        vec![],
-                        vec![],
-                        txs,
-                        &mut rand::rng(),
-                    )
+                    .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], txs, &mut rand::rng())
                     .map_err(|e| RestError::internal_server_error(anyhow!("Failed to prepare block: {}", e)))?;
 
                 // Update the ledger to the new block.
