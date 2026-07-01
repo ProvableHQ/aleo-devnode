@@ -84,6 +84,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y libclang-dev
 
+      - name: Set LIBCLANG_PATH (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         uses: KyleMayes/install-llvm-action@v1
