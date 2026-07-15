@@ -1,0 +1,74 @@
+name: Publish to npm
+
+# Recovery/backfill path: publishes the npm packages from the binaries already
+# attached to an existing GitHub release, without cutting a new release. The
+# normal path is the npm job in release.yml; use this one when that job failed
+# partway, or to publish npm packages for a release that predates them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing GitHub release tag whose binaries to publish (e.g. v0.2.1)"
+        required: true
+
+env:
+  TAG: ${{ github.event.inputs.tag }}
+
+jobs:
+  npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately the default branch, not the tag: the npm packaging
+      # scripts must be present regardless of what the tag's tree contains.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download release assets
+        run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Extract binaries by target
+        run: |
+          # artifacts/aleo-devnode-<tag>-<target>.zip
+          #   -> bins/<target>/aleo-devnode[.exe]
+          for zip in artifacts/*.zip; do
+            base="$(basename "$zip" .zip)"
+            target="${base#aleo-devnode-${TAG}-}"
+            mkdir -p "bins/$target"
+            unzip -o "$zip" -d "bins/$target"
+          done
+
+      - name: Build npm packages
+        run: node scripts/build-npm.mjs --version "${TAG#v}" --artifacts bins --out dist-npm
+
+      - name: Publish
+        run: |
+          set -e
+          VERSION="${TAG#v}"
+          # Skip already-published packages so a partial earlier publish can
+          # be resumed. Platform packages first, then the main launcher last,
+          # so main's exact-pinned optionalDependencies always resolve on
+          # install.
+          publish() {
+            local name
+            name="$(node -p "require('./$1/package.json').name")"
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION} already published, skipping"
+            else
+              npm publish "$1" --access public
+            fi
+          }
+          for pkg in dist-npm/*/; do
+            [ "$pkg" = "dist-npm/main/" ] && continue
+            publish "${pkg%/}"
+          done
+          publish dist-npm/main
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
