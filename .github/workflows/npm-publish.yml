@@ -1,9 +1,12 @@
 name: Publish to npm
 
-# Recovery/backfill path: publishes the npm packages from the binaries already
-# attached to an existing GitHub release, without cutting a new release. The
-# normal path is the npm job in release.yml; use this one when that job failed
-# partway, or to publish npm packages for a release that predates them.
+# The single npm publishing path: publishes the npm packages from the binaries
+# attached to an existing GitHub release, without cutting a new release.
+# Normally dispatched by release.yml after it publishes the GitHub release;
+# run it manually to recover from a partial publish or to backfill npm
+# packages for a release that predates them. Keeping all publishing in one
+# workflow file lets npm's trusted publisher config (one per package, matched
+# by workflow filename) cover every publish.
 
 on:
   workflow_dispatch:

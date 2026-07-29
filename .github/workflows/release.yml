@@ -173,46 +173,15 @@ jobs:
 
   npm:
     name: Publish to npm
-    needs: [prepare, build]
+    needs: [prepare, release]
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: artifacts
-
-      - name: Extract binaries by target
-        run: |
-          # artifacts/release-<target>/aleo-devnode-<tag>-<target>.zip
-          #   -> bins/<target>/aleo-devnode[.exe]
-          for dir in artifacts/release-*; do
-            target="${dir#artifacts/release-}"
-            mkdir -p "bins/$target"
-            unzip -o "$dir"/*.zip -d "bins/$target"
-          done
-
-      - name: Build npm packages
-        run: node scripts/build-npm.mjs --version "${{ needs.prepare.outputs.version }}" --artifacts bins --out dist-npm
-
-      - name: Publish
-        run: |
-          set -e
-          # Platform packages first, then the main launcher last, so main's
-          # exact-pinned optionalDependencies always resolve on install.
-          for pkg in dist-npm/*/; do
-            [ "$pkg" = "dist-npm/main/" ] && continue
-            npm publish "$pkg" --access public
-          done
-          npm publish dist-npm/main/ --access public
+      # All npm publishing lives in npm-publish.yml so npm's trusted publisher
+      # config can point at a single workflow file. It publishes from the
+      # release assets, so it must run after the GitHub release exists.
+      - name: Dispatch npm publish workflow
+        run: gh workflow run npm-publish.yml -f tag="${{ needs.prepare.outputs.tag }}" -R "${{ github.repository }}"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
