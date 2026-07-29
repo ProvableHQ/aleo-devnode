@@ -4,13 +4,14 @@ name: Publish to npm
 # GitHub release from the binaries attached to it, without cutting a new
 # release. Normally dispatched by release.yml after it publishes the GitHub
 # release; run it manually against the same tag to retry a partial or failed
-# publish. Only stable vX.Y.Z tags are accepted — prereleases and other tag
-# shapes must be published manually. Per package, the version is published
-# only if it is strictly newer than the package's current npm `latest`;
-# anything already published or older is skipped, so the workflow can never
-# move `latest` backwards and a retry only fills in what is missing. Keeping
-# all publishing in one workflow file lets npm's trusted publisher config
-# (one per package, matched by workflow filename) cover every publish.
+# publish. Only the repository's newest stable vX.Y.Z tag is accepted —
+# prereleases, malformed tags, and older releases are refused and must be
+# published manually. Per package, already-published versions are skipped
+# and the version must be strictly newer than the package's current npm
+# `latest`, so a retry publishes exactly the packages a partial earlier run
+# missed and the workflow can never move `latest` backwards. Keeping all
+# publishing in one workflow file lets npm's trusted publisher config (one
+# per package, matched by workflow filename) cover every publish.
 
 on:
   workflow_dispatch:
@@ -36,12 +37,24 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     steps:
-      - name: Require stable vX.Y.Z tag
+      - name: Require the newest stable vX.Y.Z tag
         run: |
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::Tag '$TAG' is not a stable vX.Y.Z release tag. Prerelease and other tags must be published manually."
             exit 1
           fi
+          # Only the newest stable tag may be published: retrying it fills in
+          # packages a partial earlier run missed, but older tags are refused
+          # outright — backpublishing is a manual operation. sort -V is safe
+          # here because the grep leaves only plain X.Y.Z versions.
+          NEWEST="$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [ "$TAG" != "$NEWEST" ]; then
+            echo "::error::Tag '$TAG' is not the newest stable release tag ('$NEWEST'). Backpublishing older releases must be done manually."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       # The tag's tree is what gets published: packaging scripts and package
       # metadata come from the tag itself, so a republish is reproducible.
