@@ -2,10 +2,38 @@
 
 The devnode is a standalone Aleo development node for local testing and development. Unlike a production node, it **does not verify proofs**. This means transactions can be built with placeholder proofs (for executions) and placeholder verifying keys (for deployments and upgrades), making quick local iteration and fast end-to-end testing by bypassing proof generation when creating a transaction.
 
-## Build
+## Installation
+
+### npm (recommended)
+
+Prebuilt binaries are distributed on npm for macOS (arm64, x64), Linux (x64, arm64), and Windows (x64). Requires Node.js ≥ 18.
+
+Install globally:
+
+```sh
+npm install -g @provablehq/aleo-devnode
+aleo-devnode --help
+```
+
+Or add it to a project as a dev dependency:
+
+```sh
+npm install --save-dev @provablehq/aleo-devnode
+```
+
+The `@provablehq/aleo-devnode` package is a small launcher that pulls in the binary for your platform via an optional dependency (e.g. `@provablehq/aleo-devnode-darwin-arm64`). Packages are published from CI via [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) with provenance attestation — verify with `npm audit signatures`.
+
+### Prebuilt binaries
+
+Download the zip for your platform from the [GitHub releases page](https://github.com/ProvableHQ/aleo-devnode/releases), verify it against the release's `sha256sums.txt`, unpack it, and put `aleo-devnode` on your `PATH`.
+
+### From source
+
+Requires a Rust toolchain and `clang`/`libclang` (needed by RocksDB; on macOS it comes with the Xcode Command Line Tools, on Debian/Ubuntu install `libclang-dev`):
 
 ```sh
 cargo build --release
+# binary at target/release/aleo-devnode
 ```
 
 ## Usage
