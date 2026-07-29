@@ -4,11 +4,13 @@ name: Publish to npm
 # GitHub release from the binaries attached to it, without cutting a new
 # release. Normally dispatched by release.yml after it publishes the GitHub
 # release; run it manually against the same tag to retry a partial or failed
-# publish — already-published packages are skipped, so a retry only fills in
-# what is missing, and retrying a version older than the current npm latest
-# will not steal the `latest` dist-tag. Keeping all publishing in one
-# workflow file lets npm's trusted publisher config (one per package, matched
-# by workflow filename) cover every publish.
+# publish. Only stable vX.Y.Z tags are accepted — prereleases and other tag
+# shapes must be published manually. Per package, the version is published
+# only if it is strictly newer than the package's current npm `latest`;
+# anything already published or older is skipped, so the workflow can never
+# move `latest` backwards and a retry only fills in what is missing. Keeping
+# all publishing in one workflow file lets npm's trusted publisher config
+# (one per package, matched by workflow filename) cover every publish.
 
 on:
   workflow_dispatch:
@@ -34,6 +36,13 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     steps:
+      - name: Require stable vX.Y.Z tag
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag '$TAG' is not a stable vX.Y.Z release tag. Prerelease and other tags must be published manually."
+            exit 1
+          fi
+
       # The tag's tree is what gets published: packaging scripts and package
       # metadata come from the tag itself, so a republish is reproducible.
       # Consequence: this only works for tags that contain scripts/build-npm.mjs.
@@ -80,19 +89,17 @@ jobs:
               echo "${name}@${VERSION} already published, skipping"
               return
             fi
-            # When retrying a version older than what is already on npm,
-            # publish under a temporary dist-tag so `latest` keeps pointing
-            # at the newer version, then drop the temporary tag. Compared
-            # with real semver (not sort -V), which ranks prereleases below
-            # their release: 0.3.0-rc.1 < 0.3.0.
+            # Never publish backwards: unless this version is strictly newer
+            # than the package's current npm latest, skip it — publishing
+            # would move the `latest` dist-tag onto an older version. Real
+            # semver comparison (not sort -V), so a manually published
+            # prerelease latest ranks below its release: 0.3.0-rc.1 < 0.3.0.
             latest="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
-            if [ -n "$latest" ] && [ "$(npx --yes semver "$latest" "$VERSION" | tail -n1)" != "$VERSION" ]; then
-              npm publish "$1" --access public --tag backfill
-              npm dist-tag rm "$name" backfill \
-                || echo "::warning::failed to remove temporary dist-tag 'backfill' from ${name}"
-            else
-              npm publish "$1" --access public
+            if [ -n "$latest" ] && ! npx --yes semver -r ">${latest}" "$VERSION" >/dev/null 2>&1; then
+              echo "${name}: npm latest (${latest}) >= ${VERSION}, skipping"
+              return
             fi
+            npm publish "$1" --access public
           }
           for pkg in dist-npm/*/; do
             [ "$pkg" = "dist-npm/main/" ] && continue

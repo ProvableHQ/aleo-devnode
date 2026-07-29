@@ -188,6 +188,13 @@ jobs:
       # release run) too.
       - name: Run npm publish workflow
         run: |
+          # npm publishing is for stable releases only; npm-publish.yml
+          # rejects other tags, so don't dispatch it for them. Prerelease
+          # tags still get a GitHub release, just no npm packages.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag '$TAG' is not a stable vX.Y.Z release tag; skipping npm publish."
+            exit 0
+          fi
           # Backdated a minute so clock skew between this runner and GitHub's
           # createdAt cannot hide the run from the --created filter below.
           DISPATCHED_AT="$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)"
