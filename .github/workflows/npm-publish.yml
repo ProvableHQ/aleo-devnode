@@ -125,10 +125,13 @@ jobs:
             fi
             npm publish "$1" --access public
           }
+          # The ./ prefix is load-bearing: a bare "dist-npm/<name>" matches
+          # npm's GitHub owner/repo shorthand and is fetched over git instead
+          # of being read as a directory.
           for pkg in dist-npm/*/; do
             [ "$pkg" = "dist-npm/main/" ] && continue
-            publish "${pkg%/}"
+            publish "./${pkg%/}"
           done
-          publish dist-npm/main
+          publish ./dist-npm/main
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
