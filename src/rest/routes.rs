@@ -771,6 +771,7 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                 block.cumulative_proof_target(),
                 block.previous_hash(),
                 None,
+                None,
             )?;
 
             let stack = rest.ledger.vm().process().get_stack(program_id)?;

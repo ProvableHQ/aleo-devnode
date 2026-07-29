@@ -181,6 +181,8 @@ fn test_persistent_storage() {
     devnode.advance(10);
     let height_before = devnode.height();
     devnode.shutdown();
+    // Rebuild this derived cache so the test targets the persisted ledger state.
+    std::fs::remove_file(storage.join("block_tree")).expect("failed to remove derived block tree cache");
 
     let port2 = alloc_port();
     let devnode2 = DevnodeGuard::start(port2, Some(&storage), true);
