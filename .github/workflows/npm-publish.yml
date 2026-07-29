@@ -90,6 +90,26 @@ jobs:
       - name: Install pinned npm and semver CLI
         run: npm install -g npm@12.0.1 semver@7.8.5
 
+      # Temporary diagnostic while bedding in trusted publishing: npm masks
+      # OIDC failures as generic ENEEDAUTH/E404 (npm/cli#9088), so verify the
+      # job actually received an OIDC-capable environment and print the
+      # claims npm will present to the registry. Prints decoded claims only —
+      # never the token itself.
+      - name: Check OIDC environment
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::OIDC unavailable: the id-token permission was not granted to this run."
+            exit 1
+          fi
+          echo "OIDC token request URL is present."
+          JWT="$(curl -sf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" | jq -r .value)"
+          node -e '
+            const c = JSON.parse(Buffer.from(process.argv[1].split(".")[1], "base64url").toString());
+            const pick = ["repository", "repository_owner", "workflow_ref", "job_workflow_ref", "ref", "environment", "event_name", "aud"];
+            console.log(JSON.stringify(Object.fromEntries(pick.map(k => [k, c[k]])), null, 2));
+          ' "$JWT"
+
       - name: Download release assets
         run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
         env:
@@ -144,3 +164,7 @@ jobs:
             publish "./${pkg%/}"
           done
           publish ./dist-npm/main
+        env:
+          # Temporary while bedding in trusted publishing: surface the OIDC
+          # token-exchange HTTP calls that ENEEDAUTH otherwise hides.
+          NPM_CONFIG_LOGLEVEL: http
