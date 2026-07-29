@@ -181,7 +181,25 @@ jobs:
       # All npm publishing lives in npm-publish.yml so npm's trusted publisher
       # config can point at a single workflow file. It publishes from the
       # release assets, so it must run after the GitHub release exists.
-      - name: Dispatch npm publish workflow
-        run: gh workflow run npm-publish.yml -f tag="${{ needs.prepare.outputs.tag }}" -R "${{ github.repository }}"
+      # `gh workflow run` is fire-and-forget and does not report the run it
+      # created, so poll for that run and watch it to completion — a failed
+      # npm publish must fail this job (and the release run) too.
+      - name: Run npm publish workflow
+        run: |
+          DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run npm-publish.yml -f tag="${{ needs.prepare.outputs.tag }}" -R "${{ github.repository }}"
+          RUN_ID=""
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            sleep 5
+            RUN_ID="$(gh run list -R "${{ github.repository }}" --workflow=npm-publish.yml \
+              --event=workflow_dispatch --created ">=$DISPATCHED_AT" \
+              --json databaseId --jq '.[0].databaseId // empty')"
+            [ -n "$RUN_ID" ] && break
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Dispatched npm-publish.yml but could not find the run it created"
+            exit 1
+          fi
+          gh run watch "$RUN_ID" -R "${{ github.repository }}" --exit-status
         env:
           GH_TOKEN: ${{ github.token }}
