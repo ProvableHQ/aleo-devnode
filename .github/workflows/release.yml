@@ -173,46 +173,49 @@ jobs:
 
   npm:
     name: Publish to npm
-    needs: [prepare, build]
+    needs: [prepare, release]
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: artifacts
-
-      - name: Extract binaries by target
+      # All npm publishing lives in npm-publish.yml so npm's trusted publisher
+      # config can point at a single workflow file. It publishes from the
+      # release assets, so it must run after the GitHub release exists.
+      # `gh workflow run` is fire-and-forget and does not report the run it
+      # created, so this run's id is embedded in the dispatched run's name
+      # ("dispatch <id>") and polled for, then the run is watched to
+      # completion — a failed npm publish must fail this job (and the
+      # release run) too.
+      - name: Run npm publish workflow
         run: |
-          # artifacts/release-<target>/aleo-devnode-<tag>-<target>.zip
-          #   -> bins/<target>/aleo-devnode[.exe]
-          for dir in artifacts/release-*; do
-            target="${dir#artifacts/release-}"
-            mkdir -p "bins/$target"
-            unzip -o "$dir"/*.zip -d "bins/$target"
+          # npm publishing is for stable releases only; npm-publish.yml
+          # rejects other tags, so don't dispatch it for them. Prerelease
+          # tags still get a GitHub release, just no npm packages.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag '$TAG' is not a stable vX.Y.Z release tag; skipping npm publish."
+            exit 0
+          fi
+          # Backdated a minute so clock skew between this runner and GitHub's
+          # createdAt cannot hide the run from the --created filter below.
+          DISPATCHED_AT="$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run npm-publish.yml -f tag="$TAG" -f dispatch_id="$GITHUB_RUN_ID" -R "$REPO"
+          RUN_ID=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            RUN_ID="$(gh run list -R "$REPO" --workflow=npm-publish.yml \
+              --event=workflow_dispatch --created ">=$DISPATCHED_AT" \
+              --json databaseId,displayTitle \
+              --jq "[.[] | select(.displayTitle | contains(\"dispatch ${GITHUB_RUN_ID})\"))][0].databaseId // empty")"
+            [ -n "$RUN_ID" ] && break
           done
-
-      - name: Build npm packages
-        run: node scripts/build-npm.mjs --version "${{ needs.prepare.outputs.version }}" --artifacts bins --out dist-npm
-
-      - name: Publish
-        run: |
-          set -e
-          # Platform packages first, then the main launcher last, so main's
-          # exact-pinned optionalDependencies always resolve on install.
-          for pkg in dist-npm/*/; do
-            [ "$pkg" = "dist-npm/main/" ] && continue
-            npm publish "$pkg" --access public
-          done
-          npm publish dist-npm/main/ --access public
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Dispatched npm-publish.yml but could not find the run it created"
+            exit 1
+          fi
+          gh run watch "$RUN_ID" -R "$REPO" --exit-status
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          # Passed via env, not ${{ }} interpolation into the script: tag
+          # names may contain shell metacharacters.
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REPO: ${{ github.repository }}

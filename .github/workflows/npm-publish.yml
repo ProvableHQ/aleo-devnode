@@ -1,9 +1,17 @@
 name: Publish to npm
 
-# Recovery/backfill path: publishes the npm packages from the binaries already
-# attached to an existing GitHub release, without cutting a new release. The
-# normal path is the npm job in release.yml; use this one when that job failed
-# partway, or to publish npm packages for a release that predates them.
+# The single npm publishing path: publishes the npm packages for an existing
+# GitHub release from the binaries attached to it, without cutting a new
+# release. Normally dispatched by release.yml after it publishes the GitHub
+# release; run it manually against the same tag to retry a partial or failed
+# publish. Only the repository's newest stable vX.Y.Z tag is accepted —
+# prereleases, malformed tags, and older releases are refused and must be
+# published manually. Per package, already-published versions are skipped
+# and the version must be strictly newer than the package's current npm
+# `latest`, so a retry publishes exactly the packages a partial earlier run
+# missed and the workflow can never move `latest` backwards. Keeping all
+# publishing in one workflow file lets npm's trusted publisher config (one
+# per package, matched by workflow filename) cover every publish.
 
 on:
   workflow_dispatch:
@@ -11,6 +19,16 @@ on:
       tag:
         description: "Existing GitHub release tag whose binaries to publish (e.g. v0.2.1)"
         required: true
+      dispatch_id:
+        description: "Opaque id embedded in the run name so a dispatching workflow can find this exact run (leave empty for manual runs)"
+        required: false
+        default: ""
+
+# The dispatch_id in the run name is what release.yml greps for to identify
+# the run it dispatched — it matches "dispatch <id>)" including the closing
+# paren, so the id must stay immediately before the final ")". Do not reword
+# without updating the matching filter there.
+run-name: "Publish to npm (${{ inputs.tag }}${{ inputs.dispatch_id != '' && format(', dispatch {0}', inputs.dispatch_id) || '' }})"
 
 env:
   TAG: ${{ github.event.inputs.tag }}
@@ -20,14 +38,46 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     steps:
-      # Deliberately the default branch, not the tag: the npm packaging
-      # scripts must be present regardless of what the tag's tree contains.
+      - name: Require the newest stable vX.Y.Z tag
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag '$TAG' is not a stable vX.Y.Z release tag. Prerelease and other tags must be published manually."
+            exit 1
+          fi
+          # Only the newest stable tag may be published: retrying it fills in
+          # packages a partial earlier run missed, but older tags are refused
+          # outright — backpublishing is a manual operation. sort -V is safe
+          # here because the grep leaves only plain X.Y.Z versions.
+          NEWEST="$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [ "$TAG" != "$NEWEST" ]; then
+            echo "::error::Tag '$TAG' is not the newest stable release tag ('$NEWEST'). Backpublishing older releases must be done manually."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # The tag's tree is what gets published: packaging scripts and package
+      # metadata come from the tag itself, so a republish is reproducible.
+      # Consequence: this only works for tags that contain scripts/build-npm.mjs.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+
+      # Installed up front so a fetch failure is a loud step failure. If the
+      # publish loop fetched it via npx on demand, a transient network error
+      # would be indistinguishable from "version not newer" and would
+      # silently skip publishing a package. Pinned to an exact version: this
+      # is the only third-party code fetched into the job that holds publish
+      # rights for the @provablehq packages, and npm versions are immutable,
+      # so a pin closes off both drift and package-takeover of new releases.
+      - name: Install semver CLI
+        run: npm install -g semver@7.8.5
 
       - name: Download release assets
         run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
@@ -57,13 +107,23 @@ jobs:
           # so main's exact-pinned optionalDependencies always resolve on
           # install.
           publish() {
-            local name
+            local name latest
             name="$(node -p "require('./$1/package.json').name")"
             if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${name}@${VERSION} already published, skipping"
-            else
-              npm publish "$1" --access public
+              return
             fi
+            # Never publish backwards: unless this version is strictly newer
+            # than the package's current npm latest, skip it — publishing
+            # would move the `latest` dist-tag onto an older version. Real
+            # semver comparison (not sort -V), so a manually published
+            # prerelease latest ranks below its release: 0.3.0-rc.1 < 0.3.0.
+            latest="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
+            if [ -n "$latest" ] && ! semver -r ">${latest}" "$VERSION" >/dev/null; then
+              echo "${name}: npm latest (${latest}) >= ${VERSION}, skipping"
+              return
+            fi
+            npm publish "$1" --access public
           }
           for pkg in dist-npm/*/; do
             [ "$pkg" = "dist-npm/main/" ] && continue
