@@ -16,6 +16,15 @@ on:
       tag:
         description: "Existing GitHub release tag whose binaries to publish (e.g. v0.2.1)"
         required: true
+      dispatch_id:
+        description: "Opaque id embedded in the run name so a dispatching workflow can find this exact run (leave empty for manual runs)"
+        required: false
+        default: ""
+
+# The dispatch_id in the run name is what release.yml greps for to identify
+# the run it dispatched — do not reword the "dispatch <id>" marker without
+# updating the matching filter there.
+run-name: "Publish to npm (${{ inputs.tag }}${{ inputs.dispatch_id != '' && format(', dispatch {0}', inputs.dispatch_id) || '' }})"
 
 env:
   TAG: ${{ github.event.inputs.tag }}

@@ -182,20 +182,23 @@ jobs:
       # config can point at a single workflow file. It publishes from the
       # release assets, so it must run after the GitHub release exists.
       # `gh workflow run` is fire-and-forget and does not report the run it
-      # created, so poll for that run and watch it to completion — a failed
-      # npm publish must fail this job (and the release run) too.
+      # created, so this run's id is embedded in the dispatched run's name
+      # ("dispatch <id>") and polled for, then the run is watched to
+      # completion — a failed npm publish must fail this job (and the
+      # release run) too.
       - name: Run npm publish workflow
         run: |
           # Backdated a minute so clock skew between this runner and GitHub's
           # createdAt cannot hide the run from the --created filter below.
           DISPATCHED_AT="$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run npm-publish.yml -f tag="$TAG" -R "$REPO"
+          gh workflow run npm-publish.yml -f tag="$TAG" -f dispatch_id="$GITHUB_RUN_ID" -R "$REPO"
           RUN_ID=""
-          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for _ in $(seq 1 24); do
             sleep 5
             RUN_ID="$(gh run list -R "$REPO" --workflow=npm-publish.yml \
               --event=workflow_dispatch --created ">=$DISPATCHED_AT" \
-              --json databaseId --jq '.[0].databaseId // empty')"
+              --json databaseId,displayTitle \
+              --jq "[.[] | select(.displayTitle | contains(\"dispatch $GITHUB_RUN_ID\"))][0].databaseId // empty")"
             [ -n "$RUN_ID" ] && break
           done
           if [ -z "$RUN_ID" ]; then
