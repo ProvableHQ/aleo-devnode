@@ -72,9 +72,12 @@ jobs:
       # Installed up front so a fetch failure is a loud step failure. If the
       # publish loop fetched it via npx on demand, a transient network error
       # would be indistinguishable from "version not newer" and would
-      # silently skip publishing a package.
+      # silently skip publishing a package. Pinned to an exact version: this
+      # is the only third-party code fetched into the job that holds publish
+      # rights for the @provablehq packages, and npm versions are immutable,
+      # so a pin closes off both drift and package-takeover of new releases.
       - name: Install semver CLI
-        run: npm install -g semver
+        run: npm install -g semver@7.8.5
 
       - name: Download release assets
         run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
