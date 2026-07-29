@@ -37,6 +37,13 @@ jobs:
   npm:
     name: Publish to npm
     runs-on: ubuntu-latest
+    permissions:
+      # Publishing authenticates via npm trusted publishing: the job mints a
+      # GitHub OIDC token that npm verifies against each package's trusted
+      # publisher config (this repo + this workflow filename). No registry
+      # token exists anywhere.
+      id-token: write
+      contents: read
     steps:
       - name: Require the newest stable vX.Y.Z tag
         run: |
@@ -64,20 +71,24 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
+      # No registry-url here: setup-node would write an .npmrc authToken
+      # line referencing $NODE_AUTH_TOKEN, and npm hard-fails on any command
+      # when a referenced env var is unset. Trusted publishing needs no
+      # token; npm publish detects the OIDC environment on its own.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          node-version: "24"
 
-      # Installed up front so a fetch failure is a loud step failure. If the
-      # publish loop fetched it via npx on demand, a transient network error
-      # would be indistinguishable from "version not newer" and would
-      # silently skip publishing a package. Pinned to an exact version: this
-      # is the only third-party code fetched into the job that holds publish
-      # rights for the @provablehq packages, and npm versions are immutable,
-      # so a pin closes off both drift and package-takeover of new releases.
-      - name: Install semver CLI
-        run: npm install -g semver@7.8.5
+      # npm >= 11.5.1 is required for trusted publishing; the runner's
+      # bundled npm may lag. Both tools installed up front so a fetch
+      # failure is a loud step failure (npx-on-demand in the publish loop
+      # would be indistinguishable from "version not newer" and silently
+      # skip a package), and pinned to exact versions: this is the only
+      # third-party code fetched into the job that holds publish rights for
+      # the @provablehq packages, and npm versions are immutable, so a pin
+      # closes off both drift and package-takeover of new releases.
+      - name: Install pinned npm and semver CLI
+        run: npm install -g npm@12.0.1 semver@7.8.5
 
       - name: Download release assets
         run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
@@ -133,5 +144,3 @@ jobs:
             publish "./${pkg%/}"
           done
           publish ./dist-npm/main
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
