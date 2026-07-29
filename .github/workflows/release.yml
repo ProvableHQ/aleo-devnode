@@ -205,7 +205,7 @@ jobs:
             RUN_ID="$(gh run list -R "$REPO" --workflow=npm-publish.yml \
               --event=workflow_dispatch --created ">=$DISPATCHED_AT" \
               --json databaseId,displayTitle \
-              --jq "[.[] | select(.displayTitle | contains(\"dispatch $GITHUB_RUN_ID\"))][0].databaseId // empty")"
+              --jq "[.[] | select(.displayTitle | contains(\"dispatch ${GITHUB_RUN_ID})\"))][0].databaseId // empty")"
             [ -n "$RUN_ID" ] && break
           done
           if [ -z "$RUN_ID" ]; then

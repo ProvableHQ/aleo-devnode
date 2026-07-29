@@ -25,8 +25,9 @@ on:
         default: ""
 
 # The dispatch_id in the run name is what release.yml greps for to identify
-# the run it dispatched — do not reword the "dispatch <id>" marker without
-# updating the matching filter there.
+# the run it dispatched — it matches "dispatch <id>)" including the closing
+# paren, so the id must stay immediately before the final ")". Do not reword
+# without updating the matching filter there.
 run-name: "Publish to npm (${{ inputs.tag }}${{ inputs.dispatch_id != '' && format(', dispatch {0}', inputs.dispatch_id) || '' }})"
 
 env:
@@ -68,6 +69,13 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      # Installed up front so a fetch failure is a loud step failure. If the
+      # publish loop fetched it via npx on demand, a transient network error
+      # would be indistinguishable from "version not newer" and would
+      # silently skip publishing a package.
+      - name: Install semver CLI
+        run: npm install -g semver
+
       - name: Download release assets
         run: gh release download "$TAG" --pattern '*.zip' --dir artifacts
         env:
@@ -108,7 +116,7 @@ jobs:
             # semver comparison (not sort -V), so a manually published
             # prerelease latest ranks below its release: 0.3.0-rc.1 < 0.3.0.
             latest="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
-            if [ -n "$latest" ] && ! npx --yes semver -r ">${latest}" "$VERSION" >/dev/null 2>&1; then
+            if [ -n "$latest" ] && ! semver -r ">${latest}" "$VERSION" >/dev/null; then
               echo "${name}: npm latest (${latest}) >= ${VERSION}, skipping"
               return
             fi
