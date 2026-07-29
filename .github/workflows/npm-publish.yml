@@ -73,9 +73,11 @@ jobs:
             fi
             # When retrying a version older than what is already on npm,
             # publish under a temporary dist-tag so `latest` keeps pointing
-            # at the newer version, then drop the temporary tag.
+            # at the newer version, then drop the temporary tag. Compared
+            # with real semver (not sort -V), which ranks prereleases below
+            # their release: 0.3.0-rc.1 < 0.3.0.
             latest="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
-            if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]; then
+            if [ -n "$latest" ] && [ "$(npx --yes semver "$latest" "$VERSION" | tail -n1)" != "$VERSION" ]; then
               npm publish "$1" --access public --tag backfill
               npm dist-tag rm "$name" backfill \
                 || echo "::warning::failed to remove temporary dist-tag 'backfill' from ${name}"

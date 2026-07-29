@@ -186,12 +186,14 @@ jobs:
       # npm publish must fail this job (and the release run) too.
       - name: Run npm publish workflow
         run: |
-          DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run npm-publish.yml -f tag="${{ needs.prepare.outputs.tag }}" -R "${{ github.repository }}"
+          # Backdated a minute so clock skew between this runner and GitHub's
+          # createdAt cannot hide the run from the --created filter below.
+          DISPATCHED_AT="$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run npm-publish.yml -f tag="$TAG" -R "$REPO"
           RUN_ID=""
           for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
             sleep 5
-            RUN_ID="$(gh run list -R "${{ github.repository }}" --workflow=npm-publish.yml \
+            RUN_ID="$(gh run list -R "$REPO" --workflow=npm-publish.yml \
               --event=workflow_dispatch --created ">=$DISPATCHED_AT" \
               --json databaseId --jq '.[0].databaseId // empty')"
             [ -n "$RUN_ID" ] && break
@@ -200,6 +202,10 @@ jobs:
             echo "::error::Dispatched npm-publish.yml but could not find the run it created"
             exit 1
           fi
-          gh run watch "$RUN_ID" -R "${{ github.repository }}" --exit-status
+          gh run watch "$RUN_ID" -R "$REPO" --exit-status
         env:
           GH_TOKEN: ${{ github.token }}
+          # Passed via env, not ${{ }} interpolation into the script: tag
+          # names may contain shell metacharacters.
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REPO: ${{ github.repository }}
