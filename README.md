@@ -8,12 +8,6 @@ The devnode is a standalone Aleo development node for local testing and developm
 
 Prebuilt binaries are distributed on npm for macOS (arm64, x64), Linux (x64, arm64), and Windows (x64). Requires Node.js ≥ 18.
 
-Run without installing:
-
-```sh
-npx @provablehq/aleo-devnode start --private-key <PRIVATE_KEY>
-```
-
 Install globally:
 
 ```sh
