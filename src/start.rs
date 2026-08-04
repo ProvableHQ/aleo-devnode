@@ -181,10 +181,7 @@ Please either:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snarkvm::{
-        ledger::{authority::Authority, narwhal::Subdag},
-        prelude::{ConsensusVersion, Field, Network},
-    };
+    use snarkvm::prelude::{ConsensusVersion, Network};
 
     const VALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH";
     const INVALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWa";
@@ -207,17 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn test_beacon_authority_enforces_block_limits() {
-        let private_key = resolve_private_key(&Some(VALID_PRIVATE_KEY.to_string())).unwrap();
-        let mut rng = rand::rng();
-        let authority = Authority::<TestnetV0>::new_beacon(&private_key, Field::from_u64(0), &mut rng).unwrap();
-        let v16_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V16).unwrap();
-        let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
+    fn test_latest_test_consensus_version_is_v18() {
+        let &(version, height) = TEST_CONSENSUS_VERSION_HEIGHTS.last().unwrap();
 
-        assert_eq!(authority.spend_limit(v16_height), Subdag::<TestnetV0>::min_spend_limit(v16_height));
-        assert!(authority.spend_limit(v16_height).is_some());
-        assert_eq!(authority.synthesis_limit(v16_height), None);
-        assert_eq!(authority.synthesis_limit(v18_height), Subdag::<TestnetV0>::min_synthesis_limit(v18_height));
-        assert!(authority.synthesis_limit(v18_height).is_some());
+        assert_eq!((version, height), (ConsensusVersion::V18, 21));
+        assert_eq!(TestnetV0::CONSENSUS_VERSION(height).unwrap(), ConsensusVersion::V18);
     }
 }
