@@ -65,6 +65,7 @@ fn active_consensus_value<T: Copy>(values: &[(ConsensusVersion, T)], consensus_v
 fn filter_preparation_limits<N: Network, C: ConsensusStorage<N>>(
     ledger: &Ledger<N, C>,
     block_height: u32,
+    synthesis_limit: Option<u64>,
     transactions: &[Transaction<N>],
 ) -> Result<(Vec<(Transaction<N>, u64)>, Vec<N::TransactionID>), RestError> {
     let consensus_version = N::CONSENSUS_VERSION(block_height)
@@ -77,9 +78,6 @@ fn filter_preparation_limits<N: Network, C: ConsensusStorage<N>>(
         active_consensus_value(&N::TRANSACTION_SPEND_LIMIT, consensus_version).ok_or_else(|| {
             RestError::internal_server_error(anyhow!("Missing transaction spend limit for {consensus_version}"))
         })?;
-    let synthesis_limit = beacon_block_limits::<N>(block_height)
-        .map_err(|error| RestError::internal_server_error(error.context("Failed to calculate beacon block limits")))?
-        .1;
     let mut block_combined_density = 0u64;
     let mut candidates = Vec::with_capacity(transactions.len());
     let mut aborted_transaction_ids = Vec::new();
@@ -160,8 +158,22 @@ fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand:
     rng: &mut R,
 ) -> Result<(Block<N>, Vec<N::TransactionID>), RestError> {
     let block_height = ledger.latest_height().saturating_add(1);
-    let (spend_limit, _) = beacon_block_limits::<N>(block_height)
+    let (spend_limit, synthesis_limit) = beacon_block_limits::<N>(block_height)
         .map_err(|error| RestError::internal_server_error(error.context("Failed to calculate beacon block limits")))?;
+
+    prepare_beacon_block_with_limit_values(ledger, private_key, transactions, spend_limit, synthesis_limit, rng)
+}
+
+/// Prepares a beacon block with explicit block limits.
+fn prepare_beacon_block_with_limit_values<N: Network, C: ConsensusStorage<N>, R: rand::Rng + rand::CryptoRng>(
+    ledger: &Ledger<N, C>,
+    private_key: &PrivateKey<N>,
+    transactions: Vec<Transaction<N>>,
+    spend_limit: Option<u64>,
+    synthesis_limit: Option<u64>,
+    rng: &mut R,
+) -> Result<(Block<N>, Vec<N::TransactionID>), RestError> {
+    let block_height = ledger.latest_height().saturating_add(1);
     let mut snarkvm_aborted_transaction_ids = Vec::new();
 
     loop {
@@ -171,9 +183,9 @@ fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand:
             .cloned()
             .collect::<Vec<_>>();
         let (preparation_candidates, preparation_aborted_transaction_ids) =
-            filter_preparation_limits(ledger, block_height, &active_transactions)?;
-        let candidate_transactions =
-            preparation_candidates.iter().map(|(transaction, _)| transaction.clone()).collect::<Vec<_>>();
+            filter_preparation_limits(ledger, block_height, synthesis_limit, &active_transactions)?;
+        let (candidate_transactions, spend_aborted_transaction_ids) =
+            filter_block_spend_limit(&preparation_candidates, spend_limit);
         let prepared_block = ledger
             .prepare_advance_to_next_beacon_block(private_key, vec![], vec![], candidate_transactions, rng)
             .map_err(|error| RestError::internal_server_error(anyhow!("Failed to prepare block: {error}")))?;
@@ -182,25 +194,6 @@ fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand:
             extend_snarkvm_aborted_transaction_ids(
                 &transactions,
                 prepared_block.aborted_transaction_ids(),
-                &mut snarkvm_aborted_transaction_ids,
-            )?;
-            continue;
-        }
-
-        let (spend_candidates, spend_aborted_transaction_ids) =
-            filter_block_spend_limit(&preparation_candidates, spend_limit);
-        let final_block = if spend_aborted_transaction_ids.is_empty() {
-            prepared_block
-        } else {
-            ledger
-                .prepare_advance_to_next_beacon_block(private_key, vec![], vec![], spend_candidates, rng)
-                .map_err(|error| RestError::internal_server_error(anyhow!("Failed to prepare block: {error}")))?
-        };
-
-        if !final_block.aborted_transaction_ids().is_empty() {
-            extend_snarkvm_aborted_transaction_ids(
-                &transactions,
-                final_block.aborted_transaction_ids(),
                 &mut snarkvm_aborted_transaction_ids,
             )?;
             continue;
@@ -215,7 +208,7 @@ fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand:
             })
             .map(Transaction::id)
             .collect();
-        return Ok((final_block, aborted_transaction_ids));
+        return Ok((prepared_block, aborted_transaction_ids));
     }
 }
 
@@ -1039,10 +1032,28 @@ mod tests {
         density: u64,
         rng: &mut (impl rand::Rng + rand::CryptoRng),
     ) -> Transaction<TestnetV0> {
+        placeholder_deployment_with_constructor(
+            ledger,
+            private_key,
+            program_name,
+            density,
+            "    assert.eq true true;\n",
+            rng,
+        )
+    }
+
+    fn placeholder_deployment_with_constructor(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: &PrivateKey<TestnetV0>,
+        program_name: &str,
+        density: u64,
+        constructor: &str,
+        rng: &mut (impl rand::Rng + rand::CryptoRng),
+    ) -> Transaction<TestnetV0> {
         const PLACEHOLDER_CERTIFICATE: &str = "certificate1qyqsqqqqqqqqqqxvwszp09v860w62s2l4g6eqf0kzppyax5we36957ywqm2dplzwvvlqg0kwlnmhzfatnax7uaqt7yqqqw0sc4u";
 
         let program = Program::from_str(&format!(
-            "program {program_name}.aleo;\n\nfunction run:\n    assert.eq true true;\n\nconstructor:\n    assert.eq true true;\n"
+            "program {program_name}.aleo;\n\nfunction run:\n    assert.eq true true;\n\nconstructor:\n{constructor}"
         ))
         .unwrap();
         let function_name = *program.functions().keys().next().unwrap();
@@ -1065,8 +1076,12 @@ mod tests {
 
         let deployment_id = deployment.to_deployment_id().unwrap();
         let owner = ProgramOwner::new(private_key, deployment_id, rng).unwrap();
-        let consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height() + 1).unwrap();
-        let (base_fee, _) = deployment_cost(ledger.vm().process(), &deployment, consensus_version).unwrap();
+        let current_consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height()).unwrap();
+        let next_consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height() + 1).unwrap();
+        let (current_base_fee, _) =
+            deployment_cost(ledger.vm().process(), &deployment, current_consensus_version).unwrap();
+        let (next_base_fee, _) = deployment_cost(ledger.vm().process(), &deployment, next_consensus_version).unwrap();
+        let base_fee = current_base_fee.max(next_base_fee);
         let authorization = ledger.vm().authorize_fee_public(private_key, base_fee, 0, deployment_id, rng).unwrap();
         let fee_transition = authorization.transitions().into_values().next().unwrap();
         let fee = Fee::from(fee_transition, ledger.latest_state_root(), None).unwrap();
@@ -1195,34 +1210,50 @@ mod tests {
         assert!(limited_block.transactions().get(&third_id).is_some());
 
         let shared_key = PrivateKey::from_str(FUNDED_ACCOUNTS[4].1).unwrap();
-        let same_payer_overflow =
-            placeholder_deployment(&ledger, &shared_key, "limit_shared_overflow", deployment_density, &mut rng);
-        let same_payer_valid =
-            placeholder_deployment(&ledger, &shared_key, "limit_shared_valid", remaining_density, &mut rng);
+        let same_payer_overflow = placeholder_deployment_with_constructor(
+            &ledger,
+            &shared_key,
+            "limit_shared_overflow",
+            1,
+            "    inv 2field into r0;\n",
+            &mut rng,
+        );
+        let same_payer_valid = placeholder_deployment(&ledger, &shared_key, "limit_shared_valid", 1, &mut rng);
         let same_payer_overflow_id = same_payer_overflow.id();
         let same_payer_valid_id = same_payer_valid.id();
+        let same_payer_overflow_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &same_payer_overflow, consensus_version)
+                .unwrap();
+        let same_payer_valid_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &same_payer_valid, consensus_version)
+                .unwrap();
+        assert!(same_payer_overflow_spend > same_payer_valid_spend);
+
+        // Without spend filtering, snarkVM accepts the first deployment and aborts the second deployment because both
+        // use the same public fee payer.
         let raw_same_payer_block = ledger
             .prepare_advance_to_next_beacon_block(
                 &beacon_key,
                 vec![],
                 vec![],
-                vec![first.clone(), same_payer_overflow.clone(), same_payer_valid.clone()],
+                vec![same_payer_overflow.clone(), same_payer_valid.clone()],
                 &mut rng,
             )
             .unwrap();
         assert_eq!(raw_same_payer_block.aborted_transaction_ids(), &[same_payer_valid_id]);
         assert!(raw_same_payer_block.transactions().get(&same_payer_overflow_id).is_some());
 
-        let (limited_same_payer_block, aborted_transaction_ids) = prepare_beacon_block_with_limits(
+        let (limited_same_payer_block, aborted_transaction_ids) = prepare_beacon_block_with_limit_values(
             &ledger,
             &beacon_key,
-            vec![first.clone(), same_payer_overflow, same_payer_valid],
+            vec![same_payer_overflow, same_payer_valid],
+            Some(same_payer_valid_spend),
+            Some(synthesis_limit),
             &mut rng,
         )
         .unwrap();
         assert_eq!(aborted_transaction_ids, vec![same_payer_overflow_id]);
         assert!(limited_same_payer_block.aborted_transaction_ids().is_empty());
-        assert!(limited_same_payer_block.transactions().get(&first_id).is_some());
         assert!(limited_same_payer_block.transactions().get(&same_payer_overflow_id).is_none());
         assert!(limited_same_payer_block.transactions().get(&same_payer_valid_id).is_some());
 
