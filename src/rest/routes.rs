@@ -1168,10 +1168,18 @@ mod tests {
         assert!(block.transactions().get(&second_id).is_some());
         assert!(block.transactions().get(&third_id).is_some());
 
+        let consensus_version = TestnetV0::CONSENSUS_VERSION(v18_height).unwrap();
+        let deployment_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &first, consensus_version).unwrap();
+        let spend_limit = beacon_block_limits::<TestnetV0>(v18_height).unwrap().0.unwrap();
+        assert!(deployment_spend > 0 && deployment_spend <= spend_limit);
+        let deployments_within_spend_limit = spend_limit / deployment_spend;
+        let spend_candidates =
+            (0..=deployments_within_spend_limit).map(|_| (first.clone(), deployment_spend)).collect::<Vec<_>>();
         let (spend_candidates, spend_aborted_transaction_ids) =
-            filter_block_spend_limit(&[(first.clone(), 60), (second.clone(), 60), (third.clone(), 40)], Some(100));
-        assert_eq!(spend_aborted_transaction_ids, vec![second_id]);
-        assert_eq!(spend_candidates.iter().map(Transaction::id).collect::<Vec<_>>(), vec![first_id, third_id]);
+            filter_block_spend_limit(&spend_candidates, Some(spend_limit));
+        assert_eq!(spend_candidates.len(), usize::try_from(deployments_within_spend_limit).unwrap());
+        assert_eq!(spend_aborted_transaction_ids, vec![first_id]);
 
         let (limited_block, aborted_transaction_ids) = prepare_beacon_block_with_limits(
             &ledger,
