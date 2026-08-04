@@ -181,15 +181,10 @@ Please either:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts::FUNDED_ACCOUNTS;
     use snarkvm::{
         ledger::{authority::Authority, narwhal::Subdag},
-        prelude::{
-            Address, Certificate, ConsensusVersion, Deployment, Fee, Field, Network, Program, ProgramOwner,
-            Transaction, VerifyingKey, deployment_cost,
-        },
+        prelude::{ConsensusVersion, Field, Network},
     };
-    use std::sync::Arc;
 
     const VALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH";
     const INVALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWa";
@@ -224,85 +219,5 @@ mod tests {
         assert_eq!(authority.synthesis_limit(v16_height), None);
         assert_eq!(authority.synthesis_limit(v18_height), Subdag::<TestnetV0>::min_synthesis_limit(v18_height));
         assert!(authority.synthesis_limit(v18_height).is_some());
-    }
-
-    fn placeholder_deployment(
-        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
-        private_key: &PrivateKey<TestnetV0>,
-        program_name: &str,
-        density: u64,
-        rng: &mut (impl rand::Rng + rand::CryptoRng),
-    ) -> Transaction<TestnetV0> {
-        const PLACEHOLDER_CERTIFICATE: &str = "certificate1qyqsqqqqqqqqqqxvwszp09v860w62s2l4g6eqf0kzppyax5we36957ywqm2dplzwvvlqg0kwlnmhzfatnax7uaqt7yqqqw0sc4u";
-
-        let program = Program::from_str(&format!(
-            "program {program_name}.aleo;\n\nfunction run:\n    assert.eq true true;\n\nconstructor:\n    assert.eq true true;\n"
-        ))
-        .unwrap();
-        let function_name = *program.functions().keys().next().unwrap();
-        let program_checksum = program.to_checksum();
-        let mut circuit_key = TestnetV0::get_credits_verifying_key("fee_public".to_string()).unwrap().as_ref().clone();
-        circuit_key.circuit_info.num_non_zero_a = usize::try_from(density).unwrap();
-        circuit_key.circuit_info.num_non_zero_b = 0;
-        circuit_key.circuit_info.num_non_zero_c = 0;
-        let verifying_key = VerifyingKey::new(Arc::new(circuit_key), 1);
-        let certificate = Certificate::from_str(PLACEHOLDER_CERTIFICATE).unwrap();
-        let owner_address = Address::try_from(private_key).unwrap();
-        let deployment = Deployment::new(
-            0,
-            program,
-            vec![(function_name, (verifying_key, certificate))],
-            Some(program_checksum),
-            Some(owner_address),
-        )
-        .unwrap();
-
-        let deployment_id = deployment.to_deployment_id().unwrap();
-        let owner = ProgramOwner::new(private_key, deployment_id, rng).unwrap();
-        let consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height() + 1).unwrap();
-        let (base_fee, _) = deployment_cost(ledger.vm().process(), &deployment, consensus_version).unwrap();
-        let authorization = ledger.vm().authorize_fee_public(private_key, base_fee, 0, deployment_id, rng).unwrap();
-        let fee_transition = authorization.transitions().into_values().next().unwrap();
-        let fee = Fee::from(fee_transition, ledger.latest_state_root(), None).unwrap();
-
-        Transaction::from_deployment(owner, deployment, fee).unwrap()
-    }
-
-    #[test]
-    fn test_beacon_block_aborts_deployment_over_synthesis_limit() {
-        let genesis = Block::from_bytes_le(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
-        )))
-        .unwrap();
-        let ledger: Ledger<TestnetV0, ConsensusMemory<TestnetV0>> =
-            Ledger::load(genesis, StorageMode::new_test(None)).unwrap();
-        let beacon_key = PrivateKey::from_str(FUNDED_ACCOUNTS[0].1).unwrap();
-        let mut rng = rand::rng();
-        let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
-
-        while ledger.latest_height() + 1 < v18_height {
-            let block =
-                ledger.prepare_advance_to_next_beacon_block(&beacon_key, vec![], vec![], vec![], &mut rng).unwrap();
-            ledger.advance_to_next_block(&block).unwrap();
-        }
-
-        let synthesis_limit = Subdag::<TestnetV0>::min_synthesis_limit(v18_height).unwrap();
-        let deployment_density = synthesis_limit / 2 + 1;
-        let first_key = PrivateKey::from_str(FUNDED_ACCOUNTS[1].1).unwrap();
-        let second_key = PrivateKey::from_str(FUNDED_ACCOUNTS[2].1).unwrap();
-        let first = placeholder_deployment(&ledger, &first_key, "limit_first", deployment_density, &mut rng);
-        let second = placeholder_deployment(&ledger, &second_key, "limit_second", deployment_density, &mut rng);
-        let first_id = first.id();
-        let second_id = second.id();
-        let block = ledger
-            .prepare_advance_to_next_beacon_block(&beacon_key, vec![], vec![], vec![first, second], &mut rng)
-            .unwrap();
-
-        assert_eq!(block.height(), v18_height);
-        assert_eq!(block.transactions().num_accepted(), 1);
-        assert_eq!(block.transactions().num_rejected(), 0);
-        assert_eq!(block.aborted_transaction_ids().as_slice(), &[second_id]);
-        assert!(block.transactions().get(&first_id).is_some());
     }
 }

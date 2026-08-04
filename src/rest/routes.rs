@@ -7,7 +7,9 @@ use super::*;
 
 use crate::restore::snapshots_sibling_dir;
 use snarkvm::{
-    prelude::{ConsensusVersion, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM, Value},
+    prelude::{
+        Block, ConsensusVersion, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM, Value,
+    },
     synthesizer::program::{FinalizeGlobalState, StackTrait},
 };
 
@@ -24,6 +26,19 @@ use rayon::prelude::*;
 /// snarkvm returns `anyhow::Error` without typed variants, so the message text is the only signal.
 fn ledger_err(err: anyhow::Error) -> RestError {
     if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
+}
+
+/// Returns an error if block preparation aborted one or more transactions.
+fn ensure_no_aborted_transactions<N: Network>(block: &Block<N>) -> Result<(), RestError> {
+    let aborted_transaction_ids = block.aborted_transaction_ids();
+    if aborted_transaction_ids.is_empty() {
+        return Ok(());
+    }
+
+    let transaction_ids = aborted_transaction_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    Err(RestError::unprocessable_entity(anyhow!(
+        "Block preparation aborted the following transactions: {transaction_ids}"
+    )))
 }
 
 /// Deserialize a CSV string into a vector of strings.
@@ -545,13 +560,16 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         if !rest.manual_block_creation {
             // Prepare and advance in a single blocking task to prevent concurrent broadcasts
             // from both preparing a block at the same height and racing to advance the ledger.
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || -> Result<(), RestError> {
                 let _guard = rest.block_creation_lock.lock();
                 let new_block = rest
                     .ledger
                     .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], vec![tx], &mut rand::rng())
-                    .map_err(|e| anyhow!("{e}"))?;
-                rest.ledger.advance_to_next_block(&new_block).map_err(|e| anyhow!("{e}"))
+                    .map_err(|e| RestError::internal_server_error(anyhow!("Failed to prepare block: {e}")))?;
+                ensure_no_aborted_transactions(&new_block)?;
+                rest.ledger
+                    .advance_to_next_block(&new_block)
+                    .map_err(|e| RestError::internal_server_error(anyhow!("Failed to advance block: {e}")))
             })
             .await
             .map_err(|e| RestError::internal_server_error(anyhow!("Task panicked: {}", e)))??;
@@ -675,14 +693,15 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             let _guard = rest.block_creation_lock.lock();
             let mut last_block = None;
 
-            // Take all unconfirmed transactions from the buffer.
+            // Copy all unconfirmed transactions from the buffer. Remove them only after the block advances.
             let mut unconfirmed_txs = Some({
-                let mut buffer = rest.buffer.lock();
-                buffer.drain(..).collect()
+                let buffer = rest.buffer.lock();
+                buffer.clone()
             });
 
             for _ in 0..num_blocks {
                 let txs = unconfirmed_txs.take().unwrap_or_default();
+                let num_txs = txs.len();
 
                 // Prepare the new block.  Note that transactions in the buffer are added to the first block.
                 // If there are no transactions left in the buffer, create an empty block.
@@ -691,10 +710,21 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
                     .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], txs, &mut rand::rng())
                     .map_err(|e| RestError::internal_server_error(anyhow!("Failed to prepare block: {}", e)))?;
 
+                if let Err(error) = ensure_no_aborted_transactions(&new_block) {
+                    let aborted_transaction_ids = new_block.aborted_transaction_ids();
+                    rest.buffer.lock().retain(|tx| !aborted_transaction_ids.contains(&tx.id()));
+                    return Err(error);
+                }
+
                 // Update the ledger to the new block.
                 rest.ledger
                     .advance_to_next_block(&new_block)
                     .map_err(|e| RestError::internal_server_error(anyhow!("Failed to advance block: {}", e)))?;
+
+                // Remove the transactions that were committed. Transactions received during block creation remain buffered.
+                if num_txs > 0 {
+                    rest.buffer.lock().drain(..num_txs);
+                }
 
                 last_block = Some(new_block);
             }
@@ -800,5 +830,166 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         }
 
         Ok(ErasedJson::new(output_strings))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::FUNDED_ACCOUNTS;
+    use aleo_std_storage::StorageMode;
+    use axum::response::IntoResponse;
+    use snarkvm::{
+        ledger::{narwhal::Subdag, store::helpers::memory::ConsensusMemory},
+        prelude::{
+            Address, Certificate, Deployment, Fee, FromBytes, Ledger, PrivateKey, ProgramOwner, TestnetV0,
+            VerifyingKey, deployment_cost,
+        },
+    };
+    use std::{str::FromStr, sync::Arc};
+
+    fn placeholder_deployment(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: &PrivateKey<TestnetV0>,
+        program_name: &str,
+        density: u64,
+        rng: &mut (impl rand::Rng + rand::CryptoRng),
+    ) -> Transaction<TestnetV0> {
+        const PLACEHOLDER_CERTIFICATE: &str = "certificate1qyqsqqqqqqqqqqxvwszp09v860w62s2l4g6eqf0kzppyax5we36957ywqm2dplzwvvlqg0kwlnmhzfatnax7uaqt7yqqqw0sc4u";
+
+        let program = Program::from_str(&format!(
+            "program {program_name}.aleo;\n\nfunction run:\n    assert.eq true true;\n\nconstructor:\n    assert.eq true true;\n"
+        ))
+        .unwrap();
+        let function_name = *program.functions().keys().next().unwrap();
+        let program_checksum = program.to_checksum();
+        let mut circuit_key = TestnetV0::get_credits_verifying_key("fee_public".to_string()).unwrap().as_ref().clone();
+        circuit_key.circuit_info.num_non_zero_a = usize::try_from(density).unwrap();
+        circuit_key.circuit_info.num_non_zero_b = 0;
+        circuit_key.circuit_info.num_non_zero_c = 0;
+        let verifying_key = VerifyingKey::new(Arc::new(circuit_key), 1);
+        let certificate = Certificate::from_str(PLACEHOLDER_CERTIFICATE).unwrap();
+        let owner_address = Address::try_from(private_key).unwrap();
+        let deployment = Deployment::new(
+            0,
+            program,
+            vec![(function_name, (verifying_key, certificate))],
+            Some(program_checksum),
+            Some(owner_address),
+        )
+        .unwrap();
+
+        let deployment_id = deployment.to_deployment_id().unwrap();
+        let owner = ProgramOwner::new(private_key, deployment_id, rng).unwrap();
+        let consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height() + 1).unwrap();
+        let (base_fee, _) = deployment_cost(ledger.vm().process(), &deployment, consensus_version).unwrap();
+        let authorization = ledger.vm().authorize_fee_public(private_key, base_fee, 0, deployment_id, rng).unwrap();
+        let fee_transition = authorization.transitions().into_values().next().unwrap();
+        let fee = Fee::from(fee_transition, ledger.latest_state_root(), None).unwrap();
+
+        Transaction::from_deployment(owner, deployment, fee).unwrap()
+    }
+
+    fn test_rest(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: PrivateKey<TestnetV0>,
+        manual_block_creation: bool,
+        buffer: Vec<Transaction<TestnetV0>>,
+    ) -> Rest<TestnetV0, ConsensusMemory<TestnetV0>> {
+        Rest {
+            ledger: ledger.clone(),
+            buffer: Arc::new(Mutex::new(buffer)),
+            handles: Default::default(),
+            num_verifying_deploys: Default::default(),
+            num_verifying_executions: Default::default(),
+            manual_block_creation,
+            private_key,
+            block_creation_lock: Default::default(),
+            shutdown_tx: Default::default(),
+            storage_path: None,
+        }
+    }
+
+    #[test]
+    fn test_aborted_deployments_fail_block_requests() {
+        let genesis = Block::from_bytes_le(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
+        )))
+        .unwrap();
+        let ledger: Ledger<TestnetV0, ConsensusMemory<TestnetV0>> =
+            Ledger::load(genesis, StorageMode::new_test(None)).unwrap();
+        let beacon_key = PrivateKey::from_str(FUNDED_ACCOUNTS[0].1).unwrap();
+        let mut rng = rand::rng();
+        let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
+
+        while ledger.latest_height() + 1 < v18_height {
+            let block =
+                ledger.prepare_advance_to_next_beacon_block(&beacon_key, vec![], vec![], vec![], &mut rng).unwrap();
+            ledger.advance_to_next_block(&block).unwrap();
+        }
+
+        let synthesis_limit = Subdag::<TestnetV0>::min_synthesis_limit(v18_height).unwrap();
+        let deployment_density = synthesis_limit / 2 + 1;
+        let first_key = PrivateKey::from_str(FUNDED_ACCOUNTS[1].1).unwrap();
+        let second_key = PrivateKey::from_str(FUNDED_ACCOUNTS[2].1).unwrap();
+        let first = placeholder_deployment(&ledger, &first_key, "limit_first", deployment_density, &mut rng);
+        let second = placeholder_deployment(&ledger, &second_key, "limit_second", deployment_density, &mut rng);
+        let first_id = first.id();
+        let second_id = second.id();
+        let block = ledger
+            .prepare_advance_to_next_beacon_block(
+                &beacon_key,
+                vec![],
+                vec![],
+                vec![first.clone(), second.clone()],
+                &mut rng,
+            )
+            .unwrap();
+
+        assert_eq!(block.height(), v18_height);
+        assert_eq!(block.transactions().num_accepted(), 1);
+        assert_eq!(block.transactions().num_rejected(), 0);
+        assert_eq!(block.aborted_transaction_ids().as_slice(), &[second_id]);
+        assert!(block.transactions().get(&first_id).is_some());
+
+        let oversized =
+            placeholder_deployment(&ledger, &first_key, "limit_oversized", synthesis_limit.saturating_add(1), &mut rng);
+        let initial_height = ledger.latest_height();
+        let rest = test_rest(&ledger, beacon_key, false, vec![]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(async {
+            match Rest::transaction_broadcast(
+                State(rest),
+                Query(CheckTransaction { check_transaction: Some(false) }),
+                Ok(Json(oversized)),
+            )
+            .await
+            {
+                Ok(_) => panic!("oversized deployment broadcast succeeded"),
+                Err(error) => error.into_response(),
+            }
+        });
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ledger.latest_height(), initial_height);
+
+        let rest = test_rest(&ledger, beacon_key, true, vec![first, second]);
+        let response = runtime.block_on(async {
+            match Rest::create_block(State(rest.clone()), Json(CreateBlockRequest { num_blocks: Some(1) })).await {
+                Ok(_) => panic!("block creation accepted an aborted deployment"),
+                Err(error) => error.into_response(),
+            }
+        });
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ledger.latest_height(), initial_height);
+        assert_eq!(rest.buffer.lock().iter().map(Transaction::id).collect::<Vec<_>>(), vec![first_id]);
+
+        let _ = runtime
+            .block_on(Rest::create_block(State(rest.clone()), Json(CreateBlockRequest { num_blocks: Some(1) })))
+            .expect("valid buffered deployment should create a block");
+        assert_eq!(ledger.latest_height(), v18_height);
+        assert!(rest.buffer.lock().is_empty());
     }
 }
