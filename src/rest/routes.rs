@@ -38,6 +38,8 @@ fn beacon_block_limits<N: Network>(block_height: u32) -> anyhow::Result<(Option<
     let max_certificates = active_consensus_value(&N::MAX_CERTIFICATES, consensus_version)
         .map(u64::from)
         .ok_or_else(|| anyhow!("Missing MAX_CERTIFICATES for consensus version {consensus_version}"))?;
+    // Match snarkVM PR #3350. A minimal subdag has two rounds. Each round has an availability threshold of
+    // ceil(MAX_CERTIFICATES / 3), so this is not ceil(2 * MAX_CERTIFICATES / 3).
     let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
 
     let spend_limit = if consensus_version >= ConsensusVersion::V16 {
@@ -1121,6 +1123,7 @@ mod tests {
         assert_eq!(synthesis_limit, None);
 
         let max_certificates = TestnetV0::MAX_CERTIFICATES.last().unwrap().1 as u64;
+        // A minimal subdag contains two availability thresholds, one for each round.
         let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
         let expected_spend_limit =
             min_certificates.saturating_mul(BatchHeader::<TestnetV0>::batch_spend_limit(v18_height));
