@@ -14,13 +14,7 @@ use aleo_std_storage::StorageMode;
 use snarkvm::{
     ledger::store::helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
     prelude::{
-        Block,
-        FromBytes,
-        Ledger,
-        PrivateKey,
-        TEST_CONSENSUS_VERSION_HEIGHTS,
-        TestnetV0,
-        store::ConsensusStorage,
+        Block, FromBytes, Ledger, PrivateKey, TEST_CONSENSUS_VERSION_HEIGHTS, TestnetV0, store::ConsensusStorage,
     },
 };
 
@@ -187,6 +181,7 @@ Please either:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snarkvm::prelude::{ConsensusVersion, Network};
 
     const VALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWH";
     const INVALID_PRIVATE_KEY: &str = "APrivateKey1zkp8CZNn3yeCseEtxuVPbDCwSyhGW6yZKUYKfgXmcpoGPWa";
@@ -206,5 +201,13 @@ mod tests {
     #[test]
     fn test_valid_private_key_from_flag() {
         assert!(resolve_private_key(&Some(VALID_PRIVATE_KEY.to_string())).is_ok());
+    }
+
+    #[test]
+    fn test_latest_test_consensus_version_is_v18() {
+        let &(version, height) = TEST_CONSENSUS_VERSION_HEIGHTS.last().unwrap();
+
+        assert_eq!((version, height), (ConsensusVersion::V18, 21));
+        assert_eq!(TestnetV0::CONSENSUS_VERSION(height).unwrap(), ConsensusVersion::V18);
     }
 }

@@ -43,7 +43,7 @@ curl -X POST http://127.0.0.1:3030/testnet/transaction/broadcast \
 
 **When to use:** every time you want to commit a transaction. In **auto mode** (default) a successful broadcast *immediately mints one block* containing the transaction — nothing else is needed. In **`--manual-block-creation` mode** the transaction is only buffered; it does not land on the ledger until you call `POST /block/create`.
 
-Returns `200` with the transaction ID on success. Failure modes: `400` (transaction exceeds the byte limit), `422` (malformed JSON body or failed validation), `429` (too many in-flight verifications — bounded per type by `VM::MAX_PARALLEL_EXECUTE_VERIFICATIONS` / `MAX_PARALLEL_DEPLOY_VERIFICATIONS`; retry with backoff).
+Returns `200` with the transaction ID on success. In automatic mode, the transaction must comply with the beacon block spend limit from consensus V16 and the beacon block synthesis limit from consensus V18. The devnode does not create a block when the transaction exceeds a limit. The Devnode returns `422` if block preparation aborts the transaction. The legacy routes return `500` for this error. Other failure modes are `400` for a transaction that exceeds the byte limit, `422` for malformed JSON or failed validation, and `429` when too many verifications are active.
 
 ### `POST /block/create` — mint blocks on demand
 
@@ -63,7 +63,7 @@ curl -X POST http://127.0.0.1:3030/testnet/block/create \
 - In **`--manual-block-creation` mode**: this is how buffered broadcasts actually get committed. Broadcast N transactions, then call this once to seal them into a block. Use this when a test needs several transactions in a *single* block, or precise control over block boundaries/timing.
 - In **auto mode**: the buffer is always empty (broadcasts self-seal), so calling this just mints *empty* blocks — handy to advance height or trigger time/height-gated logic without any transactions.
 
-Returns the last created block as JSON. `400` if `num_blocks` is `0` or exceeds `1000`.
+Returns the last created block as JSON. The beacon block spend and synthesis limits apply to all buffered transactions in transaction order. The Devnode returns `422` if block preparation aborts a buffered transaction. The devnode removes each aborted transaction and keeps the other buffered transactions. It does not create a block for the failed request. The legacy routes return `500` for this error. The route returns `400` if `num_blocks` is `0` or exceeds `1000`.
 
 ### `POST /snapshot` — checkpoint the ledger (online)
 

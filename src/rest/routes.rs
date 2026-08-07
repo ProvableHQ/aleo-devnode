@@ -7,8 +7,14 @@ use super::*;
 
 use crate::restore::snapshots_sibling_dir;
 use snarkvm::{
-    prelude::{ConsensusVersion, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM, Value},
-    synthesizer::program::{FinalizeGlobalState, StackTrait},
+    ledger::narwhal::BatchHeader,
+    prelude::{
+        Block, ConsensusVersion, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM, Value,
+    },
+    synthesizer::{
+        process::transaction_compute_spend_in_microcredits,
+        program::{FinalizeGlobalState, StackTrait},
+    },
 };
 
 use axum::{Json, extract::rejection::JsonRejection};
@@ -24,6 +30,200 @@ use rayon::prelude::*;
 /// snarkvm returns `anyhow::Error` without typed variants, so the message text is the only signal.
 fn ledger_err(err: anyhow::Error) -> RestError {
     if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
+}
+
+/// Returns the spend and synthesis limits for a minimally dense beacon block.
+fn beacon_block_limits<N: Network>(block_height: u32) -> anyhow::Result<(Option<u64>, Option<u64>)> {
+    let consensus_version = N::CONSENSUS_VERSION(block_height)?;
+    let max_certificates = active_consensus_value(&N::MAX_CERTIFICATES, consensus_version)
+        .map(u64::from)
+        .ok_or_else(|| anyhow!("Missing MAX_CERTIFICATES for consensus version {consensus_version}"))?;
+    // Match snarkVM PR #3350. A minimal subdag has two rounds. Each round has an availability threshold of
+    // ceil(MAX_CERTIFICATES / 3), so this is not ceil(2 * MAX_CERTIFICATES / 3).
+    let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
+
+    let spend_limit = if consensus_version >= ConsensusVersion::V16 {
+        Some(min_certificates.saturating_mul(BatchHeader::<N>::batch_spend_limit(block_height)))
+    } else {
+        None
+    };
+    let synthesis_limit = if consensus_version >= ConsensusVersion::V18 {
+        let synthesis_per_round = 5_f64 * N::SYNTHESIS_PER_SECOND_OF_RUNTIME as f64;
+        let synthesis_per_certificate = synthesis_per_round / max_certificates as f64;
+        Some((synthesis_per_certificate * min_certificates as f64) as u64)
+    } else {
+        None
+    };
+
+    Ok((spend_limit, synthesis_limit))
+}
+
+/// Returns the value that applies at the given consensus version.
+fn active_consensus_value<T: Copy>(values: &[(ConsensusVersion, T)], consensus_version: ConsensusVersion) -> Option<T> {
+    values.iter().rfind(|(version, _)| *version <= consensus_version).map(|(_, value)| *value)
+}
+
+/// Removes transactions that exceed a transaction or block synthesis limit.
+fn filter_preparation_limits<N: Network, C: ConsensusStorage<N>>(
+    ledger: &Ledger<N, C>,
+    block_height: u32,
+    synthesis_limit: Option<u64>,
+    transactions: &[Transaction<N>],
+) -> Result<(Vec<(Transaction<N>, u64)>, Vec<N::TransactionID>), RestError> {
+    let consensus_version = N::CONSENSUS_VERSION(block_height)
+        .map_err(|error| RestError::internal_server_error(error.context("Failed to determine consensus version")))?;
+    if consensus_version < ConsensusVersion::V16 {
+        return Ok((transactions.iter().cloned().map(|transaction| (transaction, 0)).collect(), Vec::new()));
+    }
+
+    let transaction_spend_limit =
+        active_consensus_value(&N::TRANSACTION_SPEND_LIMIT, consensus_version).ok_or_else(|| {
+            RestError::internal_server_error(anyhow!("Missing transaction spend limit for {consensus_version}"))
+        })?;
+    let mut block_combined_density = 0u64;
+    let mut candidates = Vec::with_capacity(transactions.len());
+    let mut aborted_transaction_ids = Vec::new();
+
+    for transaction in transactions {
+        let Ok(compute_spend) =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), transaction, consensus_version)
+        else {
+            aborted_transaction_ids.push(transaction.id());
+            continue;
+        };
+        if compute_spend > transaction_spend_limit {
+            aborted_transaction_ids.push(transaction.id());
+            continue;
+        }
+        if let (Some(synthesis_limit), Some(deployment)) = (synthesis_limit, transaction.deployment()) {
+            let density = deployment.combined_density();
+            if block_combined_density.saturating_add(density) > synthesis_limit {
+                aborted_transaction_ids.push(transaction.id());
+                continue;
+            }
+            block_combined_density = block_combined_density.saturating_add(density);
+        }
+        candidates.push((transaction.clone(), compute_spend));
+    }
+
+    Ok((candidates, aborted_transaction_ids))
+}
+
+/// Removes transactions that exceed the cumulative block spend limit.
+fn filter_block_spend_limit<N: Network>(
+    transactions: &[(Transaction<N>, u64)],
+    spend_limit: Option<u64>,
+) -> (Vec<Transaction<N>>, Vec<N::TransactionID>) {
+    let mut block_spend = 0u64;
+    let mut candidates = Vec::with_capacity(transactions.len());
+    let mut aborted_transaction_ids = Vec::new();
+
+    for (transaction, compute_spend) in transactions {
+        if spend_limit.is_some_and(|limit| block_spend.saturating_add(*compute_spend) > limit) {
+            aborted_transaction_ids.push(transaction.id());
+            continue;
+        }
+        block_spend = block_spend.saturating_add(*compute_spend);
+        candidates.push(transaction.clone());
+    }
+
+    (candidates, aborted_transaction_ids)
+}
+
+/// Adds aborted IDs that belong to the candidate transaction list.
+fn extend_snarkvm_aborted_transaction_ids<N: Network>(
+    transactions: &[Transaction<N>],
+    new_transaction_ids: &[N::TransactionID],
+    aborted_transaction_ids: &mut Vec<N::TransactionID>,
+) -> Result<(), RestError> {
+    let previous_len = aborted_transaction_ids.len();
+    for transaction_id in new_transaction_ids {
+        if transactions.iter().any(|transaction| transaction.id() == *transaction_id)
+            && !aborted_transaction_ids.contains(transaction_id)
+        {
+            aborted_transaction_ids.push(*transaction_id);
+        }
+    }
+    if aborted_transaction_ids.len() == previous_len {
+        return Err(RestError::internal_server_error(anyhow!(
+            "Block preparation returned an unknown aborted transaction"
+        )));
+    }
+    Ok(())
+}
+
+/// Prepares a beacon block and enforces the limits that snarkVM 4.9.0 skips for beacon blocks.
+fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand::Rng + rand::CryptoRng>(
+    ledger: &Ledger<N, C>,
+    private_key: &PrivateKey<N>,
+    transactions: Vec<Transaction<N>>,
+    rng: &mut R,
+) -> Result<(Block<N>, Vec<N::TransactionID>), RestError> {
+    let block_height = ledger.latest_height().saturating_add(1);
+    let (spend_limit, synthesis_limit) = beacon_block_limits::<N>(block_height)
+        .map_err(|error| RestError::internal_server_error(error.context("Failed to calculate beacon block limits")))?;
+
+    prepare_beacon_block_with_limit_values(ledger, private_key, transactions, spend_limit, synthesis_limit, rng)
+}
+
+/// Prepares a beacon block with explicit block limits.
+fn prepare_beacon_block_with_limit_values<N: Network, C: ConsensusStorage<N>, R: rand::Rng + rand::CryptoRng>(
+    ledger: &Ledger<N, C>,
+    private_key: &PrivateKey<N>,
+    transactions: Vec<Transaction<N>>,
+    spend_limit: Option<u64>,
+    synthesis_limit: Option<u64>,
+    rng: &mut R,
+) -> Result<(Block<N>, Vec<N::TransactionID>), RestError> {
+    let block_height = ledger.latest_height().saturating_add(1);
+    let mut snarkvm_aborted_transaction_ids = Vec::new();
+
+    loop {
+        let active_transactions = transactions
+            .iter()
+            .filter(|transaction| !snarkvm_aborted_transaction_ids.contains(&transaction.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (preparation_candidates, preparation_aborted_transaction_ids) =
+            filter_preparation_limits(ledger, block_height, synthesis_limit, &active_transactions)?;
+        let (candidate_transactions, spend_aborted_transaction_ids) =
+            filter_block_spend_limit(&preparation_candidates, spend_limit);
+        let prepared_block = ledger
+            .prepare_advance_to_next_beacon_block(private_key, vec![], vec![], candidate_transactions, rng)
+            .map_err(|error| RestError::internal_server_error(anyhow!("Failed to prepare block: {error}")))?;
+
+        if !prepared_block.aborted_transaction_ids().is_empty() {
+            extend_snarkvm_aborted_transaction_ids(
+                &transactions,
+                prepared_block.aborted_transaction_ids(),
+                &mut snarkvm_aborted_transaction_ids,
+            )?;
+            continue;
+        }
+
+        let aborted_transaction_ids = transactions
+            .iter()
+            .filter(|transaction| {
+                snarkvm_aborted_transaction_ids.contains(&transaction.id())
+                    || preparation_aborted_transaction_ids.contains(&transaction.id())
+                    || spend_aborted_transaction_ids.contains(&transaction.id())
+            })
+            .map(Transaction::id)
+            .collect();
+        return Ok((prepared_block, aborted_transaction_ids));
+    }
+}
+
+/// Returns an error if block preparation aborted one or more transactions.
+fn ensure_no_aborted_transactions<T: ToString>(aborted_transaction_ids: &[T]) -> Result<(), RestError> {
+    if aborted_transaction_ids.is_empty() {
+        return Ok(());
+    }
+
+    let transaction_ids = aborted_transaction_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    Err(RestError::unprocessable_entity(anyhow!(
+        "Block preparation aborted the following transactions: {transaction_ids}"
+    )))
 }
 
 /// Deserialize a CSV string into a vector of strings.
@@ -545,13 +745,14 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         if !rest.manual_block_creation {
             // Prepare and advance in a single blocking task to prevent concurrent broadcasts
             // from both preparing a block at the same height and racing to advance the ledger.
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || -> Result<(), RestError> {
                 let _guard = rest.block_creation_lock.lock();
-                let new_block = rest
-                    .ledger
-                    .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], vec![tx], &mut rand::rng())
-                    .map_err(|e| anyhow!("{e}"))?;
-                rest.ledger.advance_to_next_block(&new_block).map_err(|e| anyhow!("{e}"))
+                let (new_block, aborted_transaction_ids) =
+                    prepare_beacon_block_with_limits(&rest.ledger, &rest.private_key, vec![tx], &mut rand::rng())?;
+                ensure_no_aborted_transactions(&aborted_transaction_ids)?;
+                rest.ledger
+                    .advance_to_next_block(&new_block)
+                    .map_err(|e| RestError::internal_server_error(anyhow!("Failed to advance block: {e}")))
             })
             .await
             .map_err(|e| RestError::internal_server_error(anyhow!("Task panicked: {}", e)))??;
@@ -675,26 +876,34 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
             let _guard = rest.block_creation_lock.lock();
             let mut last_block = None;
 
-            // Take all unconfirmed transactions from the buffer.
+            // Copy all unconfirmed transactions from the buffer. Remove them only after the block advances.
             let mut unconfirmed_txs = Some({
-                let mut buffer = rest.buffer.lock();
-                buffer.drain(..).collect()
+                let buffer = rest.buffer.lock();
+                buffer.clone()
             });
 
             for _ in 0..num_blocks {
                 let txs = unconfirmed_txs.take().unwrap_or_default();
+                let num_txs = txs.len();
 
                 // Prepare the new block.  Note that transactions in the buffer are added to the first block.
                 // If there are no transactions left in the buffer, create an empty block.
-                let new_block = rest
-                    .ledger
-                    .prepare_advance_to_next_beacon_block(&rest.private_key, vec![], vec![], txs, &mut rand::rng())
-                    .map_err(|e| RestError::internal_server_error(anyhow!("Failed to prepare block: {}", e)))?;
+                let (new_block, aborted_transaction_ids) =
+                    prepare_beacon_block_with_limits(&rest.ledger, &rest.private_key, txs, &mut rand::rng())?;
+                if let Err(error) = ensure_no_aborted_transactions(&aborted_transaction_ids) {
+                    rest.buffer.lock().retain(|tx| !aborted_transaction_ids.contains(&tx.id()));
+                    return Err(error);
+                }
 
                 // Update the ledger to the new block.
                 rest.ledger
                     .advance_to_next_block(&new_block)
                     .map_err(|e| RestError::internal_server_error(anyhow!("Failed to advance block: {}", e)))?;
+
+                // Remove the transactions that were committed. Transactions received during block creation remain buffered.
+                if num_txs > 0 {
+                    rest.buffer.lock().drain(..num_txs);
+                }
 
                 last_block = Some(new_block);
             }
@@ -800,5 +1009,300 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         }
 
         Ok(ErasedJson::new(output_strings))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::FUNDED_ACCOUNTS;
+    use aleo_std_storage::StorageMode;
+    use axum::response::IntoResponse;
+    use snarkvm::{
+        ledger::store::helpers::memory::ConsensusMemory,
+        prelude::{
+            Address, Certificate, Deployment, Fee, FromBytes, Ledger, PrivateKey, ProgramOwner, TestnetV0,
+            VerifyingKey, deployment_cost,
+        },
+    };
+    use std::{str::FromStr, sync::Arc};
+
+    fn placeholder_deployment(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: &PrivateKey<TestnetV0>,
+        program_name: &str,
+        density: u64,
+        rng: &mut (impl rand::Rng + rand::CryptoRng),
+    ) -> Transaction<TestnetV0> {
+        placeholder_deployment_with_constructor(
+            ledger,
+            private_key,
+            program_name,
+            density,
+            "    assert.eq true true;\n",
+            rng,
+        )
+    }
+
+    fn placeholder_deployment_with_constructor(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: &PrivateKey<TestnetV0>,
+        program_name: &str,
+        density: u64,
+        constructor: &str,
+        rng: &mut (impl rand::Rng + rand::CryptoRng),
+    ) -> Transaction<TestnetV0> {
+        const PLACEHOLDER_CERTIFICATE: &str = "certificate1qyqsqqqqqqqqqqxvwszp09v860w62s2l4g6eqf0kzppyax5we36957ywqm2dplzwvvlqg0kwlnmhzfatnax7uaqt7yqqqw0sc4u";
+
+        let program = Program::from_str(&format!(
+            "program {program_name}.aleo;\n\nfunction run:\n    assert.eq true true;\n\nconstructor:\n{constructor}"
+        ))
+        .unwrap();
+        let function_name = *program.functions().keys().next().unwrap();
+        let program_checksum = program.to_checksum();
+        let mut circuit_key = TestnetV0::get_credits_verifying_key("fee_public".to_string()).unwrap().as_ref().clone();
+        circuit_key.circuit_info.num_non_zero_a = usize::try_from(density).unwrap();
+        circuit_key.circuit_info.num_non_zero_b = 0;
+        circuit_key.circuit_info.num_non_zero_c = 0;
+        let verifying_key = VerifyingKey::new(Arc::new(circuit_key), 1);
+        let certificate = Certificate::from_str(PLACEHOLDER_CERTIFICATE).unwrap();
+        let owner_address = Address::try_from(private_key).unwrap();
+        let deployment = Deployment::new(
+            0,
+            program,
+            vec![(function_name, (verifying_key, certificate))],
+            Some(program_checksum),
+            Some(owner_address),
+        )
+        .unwrap();
+
+        let deployment_id = deployment.to_deployment_id().unwrap();
+        let owner = ProgramOwner::new(private_key, deployment_id, rng).unwrap();
+        let current_consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height()).unwrap();
+        let next_consensus_version = TestnetV0::CONSENSUS_VERSION(ledger.latest_height() + 1).unwrap();
+        let (current_base_fee, _) =
+            deployment_cost(ledger.vm().process(), &deployment, current_consensus_version).unwrap();
+        let (next_base_fee, _) = deployment_cost(ledger.vm().process(), &deployment, next_consensus_version).unwrap();
+        let base_fee = current_base_fee.max(next_base_fee);
+        let authorization = ledger.vm().authorize_fee_public(private_key, base_fee, 0, deployment_id, rng).unwrap();
+        let fee_transition = authorization.transitions().into_values().next().unwrap();
+        let fee = Fee::from(fee_transition, ledger.latest_state_root(), None).unwrap();
+
+        Transaction::from_deployment(owner, deployment, fee).unwrap()
+    }
+
+    fn test_rest(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: PrivateKey<TestnetV0>,
+        manual_block_creation: bool,
+        buffer: Vec<Transaction<TestnetV0>>,
+    ) -> Rest<TestnetV0, ConsensusMemory<TestnetV0>> {
+        Rest {
+            ledger: ledger.clone(),
+            buffer: Arc::new(Mutex::new(buffer)),
+            handles: Default::default(),
+            num_verifying_deploys: Default::default(),
+            num_verifying_executions: Default::default(),
+            manual_block_creation,
+            private_key,
+            block_creation_lock: Default::default(),
+            shutdown_tx: Default::default(),
+            storage_path: None,
+        }
+    }
+
+    #[test]
+    fn test_beacon_block_limits_match_v18_minimum_subdag() {
+        let v15_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V15).unwrap();
+        let v16_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V16).unwrap();
+        let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
+        assert_eq!(beacon_block_limits::<TestnetV0>(v15_height).unwrap(), (None, None));
+
+        let (spend_limit, synthesis_limit) = beacon_block_limits::<TestnetV0>(v16_height).unwrap();
+        assert!(spend_limit.is_some());
+        assert_eq!(synthesis_limit, None);
+
+        let max_certificates = TestnetV0::MAX_CERTIFICATES.last().unwrap().1 as u64;
+        // A minimal subdag contains two availability thresholds, one for each round.
+        let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
+        let expected_spend_limit =
+            min_certificates.saturating_mul(BatchHeader::<TestnetV0>::batch_spend_limit(v18_height));
+        let expected_synthesis_limit = ((5_f64 * TestnetV0::SYNTHESIS_PER_SECOND_OF_RUNTIME as f64
+            / max_certificates as f64)
+            * min_certificates as f64) as u64;
+
+        assert_eq!(
+            beacon_block_limits::<TestnetV0>(v18_height).unwrap(),
+            (Some(expected_spend_limit), Some(expected_synthesis_limit))
+        );
+    }
+
+    #[test]
+    fn test_aborted_deployments_fail_block_requests() {
+        let genesis = Block::from_bytes_le(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
+        )))
+        .unwrap();
+        let ledger: Ledger<TestnetV0, ConsensusMemory<TestnetV0>> =
+            Ledger::load(genesis, StorageMode::new_test(None)).unwrap();
+        let beacon_key = PrivateKey::from_str(FUNDED_ACCOUNTS[0].1).unwrap();
+        let mut rng = rand::rng();
+        let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
+
+        while ledger.latest_height() + 1 < v18_height {
+            let block =
+                ledger.prepare_advance_to_next_beacon_block(&beacon_key, vec![], vec![], vec![], &mut rng).unwrap();
+            ledger.advance_to_next_block(&block).unwrap();
+        }
+
+        let synthesis_limit = beacon_block_limits::<TestnetV0>(v18_height).unwrap().1.unwrap();
+        let deployment_density = synthesis_limit.saturating_mul(3).saturating_div(5);
+        let remaining_density = synthesis_limit.saturating_sub(deployment_density);
+        let first_key = PrivateKey::from_str(FUNDED_ACCOUNTS[1].1).unwrap();
+        let second_key = PrivateKey::from_str(FUNDED_ACCOUNTS[2].1).unwrap();
+        let third_key = PrivateKey::from_str(FUNDED_ACCOUNTS[3].1).unwrap();
+        let first = placeholder_deployment(&ledger, &first_key, "limit_first", deployment_density, &mut rng);
+        let second = placeholder_deployment(&ledger, &second_key, "limit_second", deployment_density, &mut rng);
+        let third = placeholder_deployment(&ledger, &third_key, "limit_third", remaining_density, &mut rng);
+        let first_id = first.id();
+        let second_id = second.id();
+        let third_id = third.id();
+        let block = ledger
+            .prepare_advance_to_next_beacon_block(
+                &beacon_key,
+                vec![],
+                vec![],
+                vec![first.clone(), second.clone(), third.clone()],
+                &mut rng,
+            )
+            .unwrap();
+
+        assert_eq!(block.height(), v18_height);
+        assert_eq!(block.transactions().num_accepted(), 3);
+        assert_eq!(block.transactions().num_rejected(), 0);
+        assert!(block.aborted_transaction_ids().is_empty());
+        assert!(block.transactions().get(&first_id).is_some());
+        assert!(block.transactions().get(&second_id).is_some());
+        assert!(block.transactions().get(&third_id).is_some());
+
+        let consensus_version = TestnetV0::CONSENSUS_VERSION(v18_height).unwrap();
+        let deployment_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &first, consensus_version).unwrap();
+        let spend_limit = beacon_block_limits::<TestnetV0>(v18_height).unwrap().0.unwrap();
+        assert!(deployment_spend > 0 && deployment_spend <= spend_limit);
+        let deployments_within_spend_limit = spend_limit / deployment_spend;
+        let spend_candidates =
+            (0..=deployments_within_spend_limit).map(|_| (first.clone(), deployment_spend)).collect::<Vec<_>>();
+        let (spend_candidates, spend_aborted_transaction_ids) =
+            filter_block_spend_limit(&spend_candidates, Some(spend_limit));
+        assert_eq!(spend_candidates.len(), usize::try_from(deployments_within_spend_limit).unwrap());
+        assert_eq!(spend_aborted_transaction_ids, vec![first_id]);
+
+        let (limited_block, aborted_transaction_ids) = prepare_beacon_block_with_limits(
+            &ledger,
+            &beacon_key,
+            vec![first.clone(), second.clone(), third.clone()],
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(aborted_transaction_ids, vec![second_id]);
+        assert!(limited_block.aborted_transaction_ids().is_empty());
+        assert!(limited_block.transactions().get(&first_id).is_some());
+        assert!(limited_block.transactions().get(&second_id).is_none());
+        assert!(limited_block.transactions().get(&third_id).is_some());
+
+        let shared_key = PrivateKey::from_str(FUNDED_ACCOUNTS[4].1).unwrap();
+        let same_payer_overflow = placeholder_deployment_with_constructor(
+            &ledger,
+            &shared_key,
+            "limit_shared_overflow",
+            1,
+            "    inv 2field into r0;\n",
+            &mut rng,
+        );
+        let same_payer_valid = placeholder_deployment(&ledger, &shared_key, "limit_shared_valid", 1, &mut rng);
+        let same_payer_overflow_id = same_payer_overflow.id();
+        let same_payer_valid_id = same_payer_valid.id();
+        let same_payer_overflow_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &same_payer_overflow, consensus_version)
+                .unwrap();
+        let same_payer_valid_spend =
+            transaction_compute_spend_in_microcredits(ledger.vm().process(), &same_payer_valid, consensus_version)
+                .unwrap();
+        assert!(same_payer_overflow_spend > same_payer_valid_spend);
+
+        // Without spend filtering, snarkVM accepts the first deployment and aborts the second deployment because both
+        // use the same public fee payer.
+        let raw_same_payer_block = ledger
+            .prepare_advance_to_next_beacon_block(
+                &beacon_key,
+                vec![],
+                vec![],
+                vec![same_payer_overflow.clone(), same_payer_valid.clone()],
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(raw_same_payer_block.aborted_transaction_ids(), &[same_payer_valid_id]);
+        assert!(raw_same_payer_block.transactions().get(&same_payer_overflow_id).is_some());
+
+        let (limited_same_payer_block, aborted_transaction_ids) = prepare_beacon_block_with_limit_values(
+            &ledger,
+            &beacon_key,
+            vec![same_payer_overflow, same_payer_valid],
+            Some(same_payer_valid_spend),
+            Some(synthesis_limit),
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(aborted_transaction_ids, vec![same_payer_overflow_id]);
+        assert!(limited_same_payer_block.aborted_transaction_ids().is_empty());
+        assert!(limited_same_payer_block.transactions().get(&same_payer_overflow_id).is_none());
+        assert!(limited_same_payer_block.transactions().get(&same_payer_valid_id).is_some());
+
+        let oversized =
+            placeholder_deployment(&ledger, &first_key, "limit_oversized", synthesis_limit.saturating_add(1), &mut rng);
+        let oversized_id = oversized.id();
+        let initial_height = ledger.latest_height();
+        let rest = test_rest(&ledger, beacon_key, false, vec![]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(async {
+            match Rest::transaction_broadcast(
+                State(rest.clone()),
+                Query(CheckTransaction { check_transaction: Some(false) }),
+                Ok(Json(oversized)),
+            )
+            .await
+            {
+                Ok(_) => panic!("oversized deployment broadcast succeeded"),
+                Err(error) => error.into_response(),
+            }
+        });
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ledger.latest_height(), initial_height);
+        assert!(rest.buffer.lock().is_empty());
+        let response_body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+        assert!(String::from_utf8(response_body.to_vec()).unwrap().contains(&oversized_id.to_string()));
+
+        let rest = test_rest(&ledger, beacon_key, true, vec![first, second, third]);
+        let response = runtime.block_on(async {
+            match Rest::create_block(State(rest.clone()), Json(CreateBlockRequest { num_blocks: Some(1) })).await {
+                Ok(_) => panic!("block creation accepted an aborted deployment"),
+                Err(error) => error.into_response(),
+            }
+        });
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ledger.latest_height(), initial_height);
+        assert_eq!(rest.buffer.lock().iter().map(Transaction::id).collect::<Vec<_>>(), vec![first_id, third_id]);
+
+        let _ = runtime
+            .block_on(Rest::create_block(State(rest.clone()), Json(CreateBlockRequest { num_blocks: Some(1) })))
+            .expect("valid buffered deployment should create a block");
+        assert_eq!(ledger.latest_height(), v18_height);
+        assert!(rest.buffer.lock().is_empty());
+        assert!(ledger.latest_block().transactions().get(&first_id).is_some());
+        assert!(ledger.latest_block().transactions().get(&third_id).is_some());
     }
 }
