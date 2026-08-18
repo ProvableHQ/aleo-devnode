@@ -21,7 +21,7 @@ reqwest            = { version = "0.13", features = ["blocking", "json"] }
 self_update        = { version = "0.41.0", features = ["archive-zip", "compression-zip-deflate"] }
 serde              = { version = "1.0", features = ["derive"] }
 serde_json         = "1.0"
-snarkvm            = { version = "4.9.0", features = ["rocks", "test_consensus_heights", "dev_skip_checks", "test_targets", "history"] }
+snarkvm            = { git = "https://github.com/ProvableHQ/snarkVM.git", tag = "testnet-v4.9.1", features = ["rocks", "test_consensus_heights", "dev_skip_checks", "test_targets", "history"] }
 tokio              = { version = "1.52.3", features = ["full"] }
 tower-http         = { version = "0.6.10", features = ["cors", "trace"] }
 tower_governor     = "0.8"
