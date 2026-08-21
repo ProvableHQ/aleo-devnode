@@ -9,7 +9,8 @@ use crate::restore::snapshots_sibling_dir;
 use snarkvm::{
     ledger::narwhal::BatchHeader,
     prelude::{
-        Block, ConsensusVersion, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM, Value,
+        Block, ConsensusVersion, Deployment, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM,
+        Value,
     },
     synthesizer::{
         process::transaction_compute_spend_in_microcredits,
@@ -19,7 +20,7 @@ use snarkvm::{
 
 use axum::{Json, extract::rejection::JsonRejection};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::Ordering;
@@ -47,7 +48,8 @@ fn beacon_block_limits<N: Network>(block_height: u32) -> anyhow::Result<(Option<
     } else {
         None
     };
-    let synthesis_limit = if consensus_version >= ConsensusVersion::V18 {
+    let v19_height = N::CONSENSUS_HEIGHT(ConsensusVersion::V19)?;
+    let synthesis_limit = if consensus_version >= ConsensusVersion::V18 && block_height <= v19_height {
         let synthesis_per_round = 5_f64 * N::SYNTHESIS_PER_SECOND_OF_RUNTIME as f64;
         let synthesis_per_certificate = synthesis_per_round / max_certificates as f64;
         Some((synthesis_per_certificate * min_certificates as f64) as u64)
@@ -63,7 +65,34 @@ fn active_consensus_value<T: Copy>(values: &[(ConsensusVersion, T)], consensus_v
     values.iter().rfind(|(version, _)| *version <= consensus_version).map(|(_, value)| *value)
 }
 
-/// Removes transactions that exceed a transaction or block synthesis limit.
+/// Checks the deployment limits that snarkVM skips when `dev_skip_checks` is enabled.
+fn check_deployment_limits<N: Network>(
+    deployment: &Deployment<N>,
+    consensus_version: ConsensusVersion,
+) -> anyhow::Result<()> {
+    let limits = if consensus_version >= ConsensusVersion::V19 {
+        Some((N::MAX_DEPLOYMENT_VARIABLES_V2, N::MAX_DEPLOYMENT_CONSTRAINTS_V2))
+    } else if consensus_version >= ConsensusVersion::V18 {
+        None
+    } else {
+        Some((N::MAX_DEPLOYMENT_VARIABLES, N::MAX_DEPLOYMENT_CONSTRAINTS))
+    };
+
+    if let Some((variable_limit, constraint_limit)) = limits {
+        ensure!(
+            deployment.num_combined_variables()? <= variable_limit,
+            "The number of combined variables exceeds the deployment limit"
+        );
+        ensure!(
+            deployment.num_combined_constraints()? <= constraint_limit,
+            "The number of combined constraints exceeds the deployment limit"
+        );
+    }
+
+    Ok(())
+}
+
+/// Removes transactions that exceed an active deployment, transaction spend, or block synthesis limit.
 fn filter_preparation_limits<N: Network, C: ConsensusStorage<N>>(
     ledger: &Ledger<N, C>,
     block_height: u32,
@@ -72,29 +101,42 @@ fn filter_preparation_limits<N: Network, C: ConsensusStorage<N>>(
 ) -> Result<(Vec<(Transaction<N>, u64)>, Vec<N::TransactionID>), RestError> {
     let consensus_version = N::CONSENSUS_VERSION(block_height)
         .map_err(|error| RestError::internal_server_error(error.context("Failed to determine consensus version")))?;
-    if consensus_version < ConsensusVersion::V16 {
-        return Ok((transactions.iter().cloned().map(|transaction| (transaction, 0)).collect(), Vec::new()));
-    }
-
-    let transaction_spend_limit =
-        active_consensus_value(&N::TRANSACTION_SPEND_LIMIT, consensus_version).ok_or_else(|| {
+    let current_consensus_version = N::CONSENSUS_VERSION(ledger.latest_height())
+        .map_err(|error| RestError::internal_server_error(error.context("Failed to determine consensus version")))?;
+    let transaction_spend_limit = if consensus_version >= ConsensusVersion::V16 {
+        Some(active_consensus_value(&N::TRANSACTION_SPEND_LIMIT, consensus_version).ok_or_else(|| {
             RestError::internal_server_error(anyhow!("Missing transaction spend limit for {consensus_version}"))
-        })?;
+        })?)
+    } else {
+        None
+    };
     let mut block_combined_density = 0u64;
     let mut candidates = Vec::with_capacity(transactions.len());
     let mut aborted_transaction_ids = Vec::new();
 
     for transaction in transactions {
-        let Ok(compute_spend) =
-            transaction_compute_spend_in_microcredits(ledger.vm().process(), transaction, consensus_version)
-        else {
-            aborted_transaction_ids.push(transaction.id());
-            continue;
-        };
-        if compute_spend > transaction_spend_limit {
+        if transaction
+            .deployment()
+            .is_some_and(|deployment| check_deployment_limits(deployment, current_consensus_version).is_err())
+        {
             aborted_transaction_ids.push(transaction.id());
             continue;
         }
+        let compute_spend = if let Some(transaction_spend_limit) = transaction_spend_limit {
+            let Ok(compute_spend) =
+                transaction_compute_spend_in_microcredits(ledger.vm().process(), transaction, consensus_version)
+            else {
+                aborted_transaction_ids.push(transaction.id());
+                continue;
+            };
+            if compute_spend > transaction_spend_limit {
+                aborted_transaction_ids.push(transaction.id());
+                continue;
+            }
+            compute_spend
+        } else {
+            0
+        };
         if let (Some(synthesis_limit), Some(deployment)) = (synthesis_limit, transaction.deployment()) {
             let density = deployment.combined_density();
             if block_combined_density.saturating_add(density) > synthesis_limit {
@@ -152,7 +194,7 @@ fn extend_snarkvm_aborted_transaction_ids<N: Network>(
     Ok(())
 }
 
-/// Prepares a beacon block and enforces the limits that snarkVM 4.9.0 skips for beacon blocks.
+/// Prepares a beacon block and enforces the limits that snarkVM skips for beacon blocks.
 fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand::Rng + rand::CryptoRng>(
     ledger: &Ledger<N, C>,
     private_key: &PrivateKey<N>,
@@ -1052,6 +1094,19 @@ mod tests {
         constructor: &str,
         rng: &mut (impl rand::Rng + rand::CryptoRng),
     ) -> Transaction<TestnetV0> {
+        placeholder_deployment_with_key_counts(ledger, private_key, program_name, density, 1, None, constructor, rng)
+    }
+
+    fn placeholder_deployment_with_key_counts(
+        ledger: &Ledger<TestnetV0, ConsensusMemory<TestnetV0>>,
+        private_key: &PrivateKey<TestnetV0>,
+        program_name: &str,
+        density: u64,
+        num_variables: u64,
+        num_constraints: Option<usize>,
+        constructor: &str,
+        rng: &mut (impl rand::Rng + rand::CryptoRng),
+    ) -> Transaction<TestnetV0> {
         const PLACEHOLDER_CERTIFICATE: &str = "certificate1qyqsqqqqqqqqqqxvwszp09v860w62s2l4g6eqf0kzppyax5we36957ywqm2dplzwvvlqg0kwlnmhzfatnax7uaqt7yqqqw0sc4u";
 
         let program = Program::from_str(&format!(
@@ -1064,7 +1119,10 @@ mod tests {
         circuit_key.circuit_info.num_non_zero_a = usize::try_from(density).unwrap();
         circuit_key.circuit_info.num_non_zero_b = 0;
         circuit_key.circuit_info.num_non_zero_c = 0;
-        let verifying_key = VerifyingKey::new(Arc::new(circuit_key), 1);
+        if let Some(num_constraints) = num_constraints {
+            circuit_key.circuit_info.num_constraints = num_constraints;
+        }
+        let verifying_key = VerifyingKey::new(Arc::new(circuit_key), num_variables);
         let certificate = Certificate::from_str(PLACEHOLDER_CERTIFICATE).unwrap();
         let owner_address = Address::try_from(private_key).unwrap();
         let deployment = Deployment::new(
@@ -1112,10 +1170,11 @@ mod tests {
     }
 
     #[test]
-    fn test_beacon_block_limits_match_v18_minimum_subdag() {
+    fn test_beacon_block_limits_match_consensus_versions() {
         let v15_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V15).unwrap();
         let v16_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V16).unwrap();
         let v18_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V18).unwrap();
+        let v19_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V19).unwrap();
         assert_eq!(beacon_block_limits::<TestnetV0>(v15_height).unwrap(), (None, None));
 
         let (spend_limit, synthesis_limit) = beacon_block_limits::<TestnetV0>(v16_height).unwrap();
@@ -1135,10 +1194,12 @@ mod tests {
             beacon_block_limits::<TestnetV0>(v18_height).unwrap(),
             (Some(expected_spend_limit), Some(expected_synthesis_limit))
         );
+        assert!(beacon_block_limits::<TestnetV0>(v19_height).unwrap().1.is_some());
+        assert_eq!(beacon_block_limits::<TestnetV0>(v19_height + 1).unwrap().1, None);
     }
 
     #[test]
-    fn test_aborted_deployments_fail_block_requests() {
+    fn test_deployment_limits_fail_block_requests() {
         let genesis = Block::from_bytes_le(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
@@ -1304,5 +1365,65 @@ mod tests {
         assert!(rest.buffer.lock().is_empty());
         assert!(ledger.latest_block().transactions().get(&first_id).is_some());
         assert!(ledger.latest_block().transactions().get(&third_id).is_some());
+
+        let v19_height = TestnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V19).unwrap();
+        let block = ledger.prepare_advance_to_next_beacon_block(&beacon_key, vec![], vec![], vec![], &mut rng).unwrap();
+        ledger.advance_to_next_block(&block).unwrap();
+        assert_eq!(ledger.latest_height(), v19_height);
+
+        let over_variables = placeholder_deployment_with_key_counts(
+            &ledger,
+            &first_key,
+            "over_variables",
+            1,
+            TestnetV0::MAX_DEPLOYMENT_VARIABLES_V2 + 1,
+            None,
+            "    assert.eq true true;\n",
+            &mut rng,
+        );
+        let over_constraints = placeholder_deployment_with_key_counts(
+            &ledger,
+            &second_key,
+            "over_constraints",
+            1,
+            1,
+            Some(usize::try_from(TestnetV0::MAX_DEPLOYMENT_CONSTRAINTS_V2 + 1).unwrap()),
+            "    assert.eq true true;\n",
+            &mut rng,
+        );
+        assert!(
+            check_deployment_limits(over_variables.deployment().unwrap(), ConsensusVersion::V19)
+                .unwrap_err()
+                .to_string()
+                .contains("combined variables exceeds the deployment limit")
+        );
+        assert!(
+            check_deployment_limits(over_constraints.deployment().unwrap(), ConsensusVersion::V19)
+                .unwrap_err()
+                .to_string()
+                .contains("combined constraints exceeds the deployment limit")
+        );
+
+        let rest = test_rest(&ledger, beacon_key, false, vec![]);
+        for transaction in [over_variables, over_constraints] {
+            let transaction_id = transaction.id();
+            let response = runtime.block_on(async {
+                match Rest::transaction_broadcast(
+                    State(rest.clone()),
+                    Query(CheckTransaction { check_transaction: Some(false) }),
+                    Ok(Json(transaction)),
+                )
+                .await
+                {
+                    Ok(_) => panic!("over-limit deployment broadcast succeeded"),
+                    Err(error) => error.into_response(),
+                }
+            });
+
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(ledger.latest_height(), v19_height);
+            let response_body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            assert!(String::from_utf8(response_body.to_vec()).unwrap().contains(&transaction_id.to_string()));
+        }
     }
 }
