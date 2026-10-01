@@ -204,10 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn test_latest_test_consensus_version_is_v21() {
+    fn test_latest_test_consensus_version_is_v22() {
         let &(version, height) = TEST_CONSENSUS_VERSION_HEIGHTS.last().unwrap();
 
-        assert_eq!((version, height), (ConsensusVersion::V21, 24));
-        assert_eq!(TestnetV0::CONSENSUS_VERSION(height).unwrap(), ConsensusVersion::V21);
+        assert_eq!((version, height), (ConsensusVersion::V22, 25));
+        assert_eq!(TestnetV0::CONSENSUS_VERSION(height).unwrap(), ConsensusVersion::V22);
     }
 }
