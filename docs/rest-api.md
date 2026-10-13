@@ -24,6 +24,7 @@ Important endpoint families include:
 - Blocks: `/block/height/latest`, `/block/latest`, `/block/{height_or_hash}`, `/block/create`
 - Transactions: `/transaction/broadcast`, `/transaction/{id}`, confirmed and unconfirmed lookups
 - Programs and mappings: `/program/{id}`, `/program/{id}/mapping/{name}/{key}`, `/program/{id}/mapping/{name}`
+- View functions: `POST /program/{id}/view/{function}` evaluates against the latest state. `POST /program/{id}/view/{function}/{height}` only accepts the latest height; any other height is an error (404 under `/v2`, a plain-string 500 under the legacy prefixes — see Route Prefixes) because snarkVM 4.12.0 removed the `history` feature and the per-height mapping record that historical view evaluation relied on.
 - State and find helpers: `/stateRoot/latest`, `/statePath/{commitment}`, `/find/...`
 - Devnode controls: `/transaction/broadcast`, `/block/create`, `/snapshot`, `/snapshots`, `/shutdown`
 

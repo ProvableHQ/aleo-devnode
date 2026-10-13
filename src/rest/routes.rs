@@ -7,7 +7,7 @@ use super::*;
 
 use crate::restore::snapshots_sibling_dir;
 use snarkvm::{
-    ledger::narwhal::BatchHeader,
+    ledger::authority::Authority,
     prelude::{
         Block, ConsensusVersion, Deployment, Identifier, LimitedWriter, Plaintext, Program, ToBytes, Transaction, VM,
         Value,
@@ -34,30 +34,14 @@ fn ledger_err(err: anyhow::Error) -> RestError {
 }
 
 /// Returns the spend and synthesis limits for a minimally dense beacon block.
+///
+/// Since snarkVM 4.12.0 the ledger applies these limits itself when it prepares and verifies beacon blocks
+/// (`Subdag::min_spend_limit` / `Subdag::min_synthesis_limit`). The devnode still filters candidates up front so
+/// that it can report every aborted transaction ID in a single pass.
 fn beacon_block_limits<N: Network>(block_height: u32) -> anyhow::Result<(Option<u64>, Option<u64>)> {
-    let consensus_version = N::CONSENSUS_VERSION(block_height)?;
-    let max_certificates = active_consensus_value(&N::MAX_CERTIFICATES, consensus_version)
-        .map(u64::from)
-        .ok_or_else(|| anyhow!("Missing MAX_CERTIFICATES for consensus version {consensus_version}"))?;
-    // Match snarkVM PR #3350. A minimal subdag has two rounds. Each round has an availability threshold of
-    // ceil(MAX_CERTIFICATES / 3), so this is not ceil(2 * MAX_CERTIFICATES / 3).
-    let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
-
-    let spend_limit = if consensus_version >= ConsensusVersion::V16 {
-        Some(min_certificates.saturating_mul(BatchHeader::<N>::batch_spend_limit(block_height)))
-    } else {
-        None
-    };
-    let v19_height = N::CONSENSUS_HEIGHT(ConsensusVersion::V19)?;
-    let synthesis_limit = if consensus_version >= ConsensusVersion::V18 && block_height <= v19_height {
-        let synthesis_per_round = 5_f64 * N::SYNTHESIS_PER_SECOND_OF_RUNTIME as f64;
-        let synthesis_per_certificate = synthesis_per_round / max_certificates as f64;
-        Some((synthesis_per_certificate * min_certificates as f64) as u64)
-    } else {
-        None
-    };
-
-    Ok((spend_limit, synthesis_limit))
+    // Fail early with a clear error if the height is not covered by the consensus height table.
+    N::CONSENSUS_VERSION(block_height)?;
+    Ok(Authority::<N>::beacon_limits(block_height))
 }
 
 /// Returns the value that applies at the given consensus version.
@@ -194,7 +178,7 @@ fn extend_snarkvm_aborted_transaction_ids<N: Network>(
     Ok(())
 }
 
-/// Prepares a beacon block and enforces the limits that snarkVM skips for beacon blocks.
+/// Prepares a beacon block, filtering out transactions that exceed the beacon block limits up front.
 fn prepare_beacon_block_with_limits<N: Network, C: ConsensusStorage<N>, R: rand::Rng + rand::CryptoRng>(
     ledger: &Ledger<N, C>,
     private_key: &PrivateKey<N>,
@@ -960,7 +944,14 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
     /// POST /{network}/program/{id}/view/{functionName}/{height}
     ///
-    /// Evaluates a view function against the ledger state at the given block `height`.
+    /// Evaluates a view function at the given block `height`, which must be the latest height.
+    ///
+    /// snarkVM 4.12.0 removed the `history` feature and with it the per-height mapping record that
+    /// `VM::evaluate_view_at_height` evaluated against, so views at a past height can no longer be served
+    /// (snarkOS answers this route with 404 in its history compatibility mode). The route is kept so that
+    /// clients which first read `/block/height/latest` and then pass that height keep working; any other
+    /// height is a 404 that points at the latest-height route (the legacy `/{network}` and `/v1/{network}`
+    /// prefixes flatten it to a 500, as they do every error).
     pub(crate) async fn evaluate_view(
         State(rest): State<Self>,
         Path((program_id, view_name, height)): Path<ViewFunctionRoute<N>>,
@@ -973,42 +964,40 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
 
         let inputs = parse_view_inputs(&raw_inputs)?;
 
-        let outputs = match tokio::task::spawn_blocking(move || {
-            rest.ledger.vm().evaluate_view_at_height(program_id, view_name, inputs, height)
-        })
-        .await
-        {
-            Ok(Ok(outputs)) => outputs,
-            Ok(Err(err)) => {
-                return Err(RestError::bad_request(
-                    err.context(format!("Failed to evaluate view '{view_name}' for '{program_id}' at height {height}")),
-                ));
-            }
-            Err(err) => return Err(RestError::internal_server_error(anyhow!("Tokio error: {err}"))),
+        let height_unavailable = |latest_height: u32| {
+            RestError::not_found(anyhow!(
+                "Cannot evaluate '{program_id}/{view_name}' at height {height}: since snarkVM 4.12.0 views can only \
+                 be evaluated at the latest height, which is {latest_height}; use POST \
+                 /{{network}}/program/{program_id}/view/{view_name} (same prefix, no height) for the latest height"
+            ))
         };
 
+        // Reject heights that are already known not to be the latest without evaluating anything.
+        let latest_height = rest.ledger.latest_height();
+        if height != latest_height {
+            return Err(height_unavailable(latest_height));
+        }
+
+        // The ledger may have advanced between the check above and the evaluation (auto block creation runs
+        // on every broadcast), so only answer if the evaluated height is the one that was asked for.
+        let (outputs, evaluated_height) =
+            Self::evaluate_view_at_latest_height(rest, program_id, view_name, inputs).await?;
+        if evaluated_height != height {
+            return Err(height_unavailable(evaluated_height));
+        }
         let output_strings: Vec<String> = outputs.iter().map(|v| v.to_string()).collect();
 
         Ok(ErasedJson::new(output_strings))
     }
 
-    /// POST /{network}/program/{id}/view/{functionName}
-    ///
-    /// Evaluates a view function against the ledger state at the latest block height.
-    pub(crate) async fn evaluate_view_latest(
-        State(rest): State<Self>,
-        Path((program_id, view_name)): Path<(ProgramID<N>, Identifier<N>)>,
-        metadata: Query<Metadata>,
-        json_result: Result<Json<Vec<String>>, JsonRejection>,
-    ) -> Result<ErasedJson, RestError> {
-        let Json(raw_inputs) = match json_result {
-            Ok(json) => json,
-            Err(err) => return Err(RestError::unprocessable_entity(anyhow!("Invalid request body: {err}"))),
-        };
-
-        let inputs = parse_view_inputs(&raw_inputs)?;
-
-        let (outputs, height) = match tokio::task::spawn_blocking(move || {
+    /// Evaluates a view function against the latest ledger state, returning the outputs and the height used.
+    async fn evaluate_view_at_latest_height(
+        rest: Self,
+        program_id: ProgramID<N>,
+        view_name: Identifier<N>,
+        inputs: Vec<Value<N>>,
+    ) -> Result<(Vec<Value<N>>, u32), RestError> {
+        match tokio::task::spawn_blocking(move || {
             let block = rest.ledger.latest_block();
             let height = block.height();
 
@@ -1032,15 +1021,31 @@ impl<N: Network, C: ConsensusStorage<N>> Rest<N, C> {
         })
         .await
         {
-            Ok(Ok(result)) => result,
-            Ok(Err(err)) => {
-                return Err(RestError::bad_request(err.context(format!(
-                    "Failed to evaluate view '{view_name}' for '{program_id}' at the latest height"
-                ))));
-            }
-            Err(err) => return Err(RestError::internal_server_error(anyhow!("Tokio error: {err}"))),
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(err)) => Err(RestError::bad_request(
+                err.context(format!("Failed to evaluate view '{view_name}' for '{program_id}' at the latest height")),
+            )),
+            Err(err) => Err(RestError::internal_server_error(anyhow!("Tokio error: {err}"))),
+        }
+    }
+
+    /// POST /{network}/program/{id}/view/{functionName}
+    ///
+    /// Evaluates a view function against the ledger state at the latest block height.
+    pub(crate) async fn evaluate_view_latest(
+        State(rest): State<Self>,
+        Path((program_id, view_name)): Path<(ProgramID<N>, Identifier<N>)>,
+        metadata: Query<Metadata>,
+        json_result: Result<Json<Vec<String>>, JsonRejection>,
+    ) -> Result<ErasedJson, RestError> {
+        let Json(raw_inputs) = match json_result {
+            Ok(json) => json,
+            Err(err) => return Err(RestError::unprocessable_entity(anyhow!("Invalid request body: {err}"))),
         };
 
+        let inputs = parse_view_inputs(&raw_inputs)?;
+
+        let (outputs, height) = Self::evaluate_view_at_latest_height(rest, program_id, view_name, inputs).await?;
         let output_strings: Vec<String> = outputs.iter().map(|v| v.to_string()).collect();
 
         if metadata.metadata.unwrap_or(false) {
@@ -1061,7 +1066,7 @@ mod tests {
     use aleo_std_storage::StorageMode;
     use axum::response::IntoResponse;
     use snarkvm::{
-        ledger::store::helpers::memory::ConsensusMemory,
+        ledger::{narwhal::BatchHeader, store::helpers::memory::ConsensusMemory},
         prelude::{
             Address, Certificate, Deployment, Fee, FromBytes, Ledger, PrivateKey, ProgramOwner, TestnetV0,
             VerifyingKey, deployment_cost,
@@ -1181,7 +1186,10 @@ mod tests {
         assert!(spend_limit.is_some());
         assert_eq!(synthesis_limit, None);
 
-        let max_certificates = TestnetV0::MAX_CERTIFICATES.last().unwrap().1 as u64;
+        // Use the value active at V18: snarkVM 4.12.0 lowers testnet `MAX_CERTIFICATES` at V22,
+        // so the last table entry is not the one that applies here.
+        let max_certificates =
+            active_consensus_value(&TestnetV0::MAX_CERTIFICATES, ConsensusVersion::V18).unwrap() as u64;
         // A minimal subdag contains two availability thresholds, one for each round.
         let min_certificates = max_certificates.saturating_add(2).saturating_div(3).saturating_mul(2);
         let expected_spend_limit =
@@ -1239,12 +1247,14 @@ mod tests {
             )
             .unwrap();
 
+        // Since snarkVM 4.12.0 the ledger applies the beacon block synthesis limit itself, so the second
+        // deployment (which overflows the limit) is aborted by snarkVM and the third one still fits.
         assert_eq!(block.height(), v18_height);
-        assert_eq!(block.transactions().num_accepted(), 3);
+        assert_eq!(block.transactions().num_accepted(), 2);
         assert_eq!(block.transactions().num_rejected(), 0);
-        assert!(block.aborted_transaction_ids().is_empty());
+        assert_eq!(block.aborted_transaction_ids(), &[second_id]);
         assert!(block.transactions().get(&first_id).is_some());
-        assert!(block.transactions().get(&second_id).is_some());
+        assert!(block.transactions().get(&second_id).is_none());
         assert!(block.transactions().get(&third_id).is_some());
 
         let consensus_version = TestnetV0::CONSENSUS_VERSION(v18_height).unwrap();
@@ -1425,5 +1435,50 @@ mod tests {
             let response_body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
             assert!(String::from_utf8(response_body.to_vec()).unwrap().contains(&transaction_id.to_string()));
         }
+    }
+
+    #[test]
+    fn test_view_at_height_only_serves_the_latest_height() {
+        let genesis = Block::from_bytes_le(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/genesis_8d710d7e2_40val_snarkos_dev_network.bin"
+        )))
+        .unwrap();
+        let ledger: Ledger<TestnetV0, ConsensusMemory<TestnetV0>> =
+            Ledger::load(genesis, StorageMode::new_test(None)).unwrap();
+        let beacon_key = PrivateKey::from_str(FUNDED_ACCOUNTS[0].1).unwrap();
+        let rest = test_rest(&ledger, beacon_key, false, vec![]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let program_id = ProgramID::<TestnetV0>::from_str("credits.aleo").unwrap();
+        let view_name = Identifier::<TestnetV0>::from_str("anything").unwrap();
+        let latest_height = ledger.latest_height();
+
+        let evaluate = |height: u32| {
+            runtime.block_on(async {
+                match Rest::evaluate_view(
+                    State(rest.clone()),
+                    Path((program_id, view_name, height)),
+                    Ok(Json(Vec::<String>::new())),
+                )
+                .await
+                {
+                    Ok(_) => panic!("view evaluation of a missing view succeeded"),
+                    Err(error) => error.into_response(),
+                }
+            })
+        };
+
+        // A past (or future) height is refused with a pointer to the latest-height route.
+        let response = evaluate(latest_height + 1);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response_body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+        let response_body = String::from_utf8(response_body.to_vec()).unwrap();
+        assert!(response_body.contains("latest height"), "{response_body}");
+        assert!(response_body.contains("/program/credits.aleo/view/anything"), "{response_body}");
+
+        // The latest height is evaluated: `credits.aleo` has no view named `anything`, so this fails in
+        // evaluation (400) rather than being refused up front (404).
+        let response = evaluate(latest_height);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
