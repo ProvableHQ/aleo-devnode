@@ -95,7 +95,9 @@ async fn start_devnode(command: Start, private_key: Option<String>) -> Result<()
                 println!("Cleaned ledger directory: {}", path.display());
             }
             println!("Using persistent ledger at: {}", path.display());
-            let storage_mode = StorageMode::Custom(path.clone());
+            // The second path would open RocksDB in read-only secondary mode (aleo-std-storage 1.0.4); the devnode
+            // always owns its ledger, so no secondary path is used.
+            let storage_mode = StorageMode::Custom(path.clone(), None);
             let ledger: Ledger<TestnetV0, ConsensusDB<TestnetV0>> =
                 tokio::task::spawn_blocking(move || Ledger::load(genesis_block, storage_mode))
                     .await

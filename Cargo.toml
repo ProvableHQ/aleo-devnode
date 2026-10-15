@@ -1,6 +1,6 @@
 [package]
 name = "aleo-devnode"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,7 @@ name = "aleo-devnode"
 path = "src/main.rs"
 
 [dependencies]
-aleo-std-storage   = { version = "1.0.3", default-features = false }
+aleo-std-storage   = { version = "1.0.4", default-features = false }
 anyhow             = "1.0"
 axum               = "0.8"
 axum-extra         = { version = "0.12", features = ["erased-json"] }
@@ -21,7 +21,7 @@ reqwest            = { version = "0.13", features = ["blocking", "json"] }
 self_update        = { version = "0.41.0", features = ["archive-zip", "compression-zip-deflate"] }
 serde              = { version = "1.0", features = ["derive"] }
 serde_json         = "1.0"
-snarkvm            = { version = "4.11.0", features = ["rocks", "test_consensus_heights", "dev_skip_checks", "test_targets", "history"] }
+snarkvm            = { version = "4.12.0", features = ["rocks", "test_consensus_heights", "dev_skip_checks", "test_targets"] }
 tokio              = { version = "1.52.3", features = ["full"] }
 tower-http         = { version = "0.6.10", features = ["cors", "trace"] }
 tower_governor     = "0.8"
